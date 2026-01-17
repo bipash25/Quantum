@@ -251,6 +251,7 @@ class DashboardStats(BaseModel):
     losses: int
     expired: int
     active: int
+    partial: int = 0  # Signals with partial TP fills
     win_rate: Optional[float]
     avg_rr_ratio: float
     avg_confidence: float
@@ -258,6 +259,12 @@ class DashboardStats(BaseModel):
     worst_symbol: Optional[str]
     total_4h_signals: int
     total_24h_signals: int
+    # P&L metrics
+    cumulative_pnl: float = 0.0  # Total P&L with 2% risk per trade
+    avg_pnl_per_trade: float = 0.0
+    tp1_hits: int = 0
+    tp2_hits: int = 0
+    tp3_hits: int = 0
     last_updated: datetime
 
 class SymbolPerformance(BaseModel):
@@ -290,22 +297,23 @@ class RecentSignalDetail(BaseModel):
 
 @app.get("/public/dashboard", response_model=DashboardStats)
 async def get_dashboard_stats():
-    """Get comprehensive dashboard statistics."""
+    """Get comprehensive dashboard statistics including P&L."""
     try:
         with engine.connect() as conn:
             # Total signals
             total = conn.execute(text("SELECT COUNT(*) FROM signals")).scalar() or 0
 
-            # Status breakdown
+            # Status breakdown (now including partial fills)
             status_query = conn.execute(text("""
                 SELECT status, COUNT(*) FROM signals GROUP BY status
             """))
             status_counts = {row[0]: row[1] for row in status_query.fetchall()}
 
-            wins = status_counts.get('hit_tp', 0)
+            wins = status_counts.get('hit_tp', 0) + status_counts.get('hit_tp3', 0)
             losses = status_counts.get('hit_sl', 0)
             expired = status_counts.get('expired', 0)
             active = status_counts.get('active', 0)
+            partial = status_counts.get('hit_tp1', 0) + status_counts.get('hit_tp2', 0)
 
             # Win rate
             completed = wins + losses
@@ -321,17 +329,35 @@ async def get_dashboard_stats():
                 "SELECT AVG(confidence) FROM signals"
             )).scalar() or 0
 
+            # P&L from outcomes table
+            pnl_stats = conn.execute(text("""
+                SELECT
+                    COALESCE(SUM(actual_pnl_percent), 0) as total_pnl,
+                    COALESCE(AVG(actual_pnl_percent), 0) as avg_pnl,
+                    COUNT(CASE WHEN tp1_hit THEN 1 END) as tp1_hits,
+                    COUNT(CASE WHEN tp2_hit THEN 1 END) as tp2_hits,
+                    COUNT(CASE WHEN tp3_hit THEN 1 END) as tp3_hits
+                FROM signal_outcomes
+                WHERE outcome IN ('win', 'loss', 'partial', 'expired')
+            """)).fetchone()
+
+            cumulative_pnl = pnl_stats[0] if pnl_stats else 0
+            avg_pnl = pnl_stats[1] if pnl_stats else 0
+            tp1_hits = pnl_stats[2] if pnl_stats else 0
+            tp2_hits = pnl_stats[3] if pnl_stats else 0
+            tp3_hits = pnl_stats[4] if pnl_stats else 0
+
             # Best/worst symbol by win rate
             symbol_stats = conn.execute(text("""
                 SELECT symbol,
                        COUNT(*) as total,
-                       SUM(CASE WHEN status = 'hit_tp' THEN 1 ELSE 0 END) as wins,
+                       SUM(CASE WHEN status IN ('hit_tp', 'hit_tp3') THEN 1 ELSE 0 END) as wins,
                        SUM(CASE WHEN status = 'hit_sl' THEN 1 ELSE 0 END) as losses
                 FROM signals
-                WHERE status IN ('hit_tp', 'hit_sl')
+                WHERE status IN ('hit_tp', 'hit_tp3', 'hit_sl')
                 GROUP BY symbol
                 HAVING COUNT(*) >= 3
-                ORDER BY SUM(CASE WHEN status = 'hit_tp' THEN 1 ELSE 0 END)::float /
+                ORDER BY SUM(CASE WHEN status IN ('hit_tp', 'hit_tp3') THEN 1 ELSE 0 END)::float /
                          NULLIF(COUNT(*), 0) DESC
             """)).fetchall()
 
@@ -353,6 +379,7 @@ async def get_dashboard_stats():
             losses=losses,
             expired=expired,
             active=active,
+            partial=partial,
             win_rate=round(win_rate, 1) if win_rate else None,
             avg_rr_ratio=round(avg_rr, 2),
             avg_confidence=round(avg_conf, 1),
@@ -360,15 +387,22 @@ async def get_dashboard_stats():
             worst_symbol=worst_symbol,
             total_4h_signals=total_4h,
             total_24h_signals=total_24h,
+            cumulative_pnl=round(cumulative_pnl, 2),
+            avg_pnl_per_trade=round(avg_pnl, 2),
+            tp1_hits=tp1_hits,
+            tp2_hits=tp2_hits,
+            tp3_hits=tp3_hits,
             last_updated=datetime.now(timezone.utc),
         )
     except Exception as e:
         logger.error(f"Error getting dashboard stats: {e}")
         return DashboardStats(
-            total_signals=0, wins=0, losses=0, expired=0, active=0,
+            total_signals=0, wins=0, losses=0, expired=0, active=0, partial=0,
             win_rate=None, avg_rr_ratio=0, avg_confidence=0,
             best_symbol=None, worst_symbol=None,
             total_4h_signals=0, total_24h_signals=0,
+            cumulative_pnl=0, avg_pnl_per_trade=0,
+            tp1_hits=0, tp2_hits=0, tp3_hits=0,
             last_updated=datetime.now(timezone.utc),
         )
 

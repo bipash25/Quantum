@@ -323,6 +323,11 @@
             <!-- Main Stats -->
             <div class="stats-grid" id="stats-grid">
                 <div class="stat-card highlight">
+                    <div class="label">Cumulative P&L</div>
+                    <div class="value" id="stat-pnl">--%</div>
+                    <div class="sub">2% risk per trade</div>
+                </div>
+                <div class="stat-card highlight">
                     <div class="label">Total Signals</div>
                     <div class="value" id="stat-total">--</div>
                     <div class="sub" id="stat-breakdown">Loading...</div>
@@ -338,9 +343,14 @@
                     <div class="sub">Risk to Reward</div>
                 </div>
                 <div class="stat-card">
-                    <div class="label">Avg Confidence</div>
-                    <div class="value" id="stat-confidence">--%</div>
-                    <div class="sub">Model prediction</div>
+                    <div class="label">TP Hit Rates</div>
+                    <div class="value" id="stat-tp-hits">--</div>
+                    <div class="sub" id="stat-tp-breakdown">TP1 / TP2 / TP3</div>
+                </div>
+                <div class="stat-card">
+                    <div class="label">Avg P&L/Trade</div>
+                    <div class="value" id="stat-avg-pnl">--%</div>
+                    <div class="sub">Per closed position</div>
                 </div>
                 <div class="stat-card">
                     <div class="label">4H Signals</div>
@@ -450,6 +460,11 @@
                 const response = await fetch(`${API_BASE}/public/dashboard`);
                 const data = await response.json();
 
+                // Cumulative P&L
+                const pnlValue = data.cumulative_pnl || 0;
+                document.getElementById('stat-pnl').textContent = (pnlValue >= 0 ? '+' : '') + pnlValue.toFixed(1) + '%';
+                document.getElementById('stat-pnl').className = 'value ' + (pnlValue >= 0 ? 'success' : 'danger');
+
                 document.getElementById('stat-total').textContent = data.total_signals;
                 document.getElementById('stat-breakdown').textContent =
                     `${data.active} active, ${data.wins + data.losses + data.expired} completed`;
@@ -462,7 +477,18 @@
                     `${data.wins} wins / ${data.losses} losses`;
 
                 document.getElementById('stat-rr').textContent = data.avg_rr_ratio + ':1';
-                document.getElementById('stat-confidence').textContent = data.avg_confidence + '%';
+
+                // TP Hit Stats
+                const totalHits = (data.tp1_hits || 0) + (data.tp2_hits || 0) + (data.tp3_hits || 0);
+                document.getElementById('stat-tp-hits').textContent = totalHits;
+                document.getElementById('stat-tp-breakdown').textContent =
+                    `TP1: ${data.tp1_hits || 0} | TP2: ${data.tp2_hits || 0} | TP3: ${data.tp3_hits || 0}`;
+
+                // Avg P&L per trade
+                const avgPnl = data.avg_pnl_per_trade || 0;
+                document.getElementById('stat-avg-pnl').textContent = (avgPnl >= 0 ? '+' : '') + avgPnl.toFixed(2) + '%';
+                document.getElementById('stat-avg-pnl').className = 'value ' + (avgPnl >= 0 ? 'success' : 'danger');
+
                 document.getElementById('stat-4h').textContent = data.total_4h_signals;
                 document.getElementById('stat-24h').textContent = data.total_24h_signals;
 
