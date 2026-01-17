@@ -157,7 +157,8 @@ class TelegramBot:
 
 💡 *Analysis:* {reasoning}
 
-_⚠️ Not financial advice. Trade responsibly._
+⚠️ *RISK WARNING:* Not financial advice. You can lose money trading. Past performance does not guarantee future results. Trade at your own risk.
+
 _📈 @QuantumTradingAIX_
 """
         return message.strip()
@@ -189,7 +190,7 @@ _📈 @QuantumTradingAIX_
                     logger.error(f"Error processing signal: {e}")
 
     async def send_startup_message(self):
-        """Send startup notification"""
+        """Send startup notification with disclaimer"""
         message = """
 🚀 *Quantum Trading AI* is now online!
 
@@ -199,6 +200,9 @@ _📈 @QuantumTradingAIX_
 
 Stay tuned for signals! 📈
 
+⚠️ *RISK WARNING:* Trading signals are for educational purposes only. Not financial advice. You can lose money trading. Past performance does not guarantee future results. Trade at your own risk.
+
+_By using this service, you accept our Terms of Service._
 _Type /help in the bot for commands_
 """
         await self.send_message(self.channel_id, message.strip())
@@ -208,9 +212,91 @@ _Type /help in the bot for commands_
         await self.start()
         await self.send_startup_message()
 
+        # Start polling for user commands in background
+        asyncio.create_task(self.poll_updates())
+
         try:
             await self.subscribe_to_signals()
         except asyncio.CancelledError:
             logger.info("Bot shutting down...")
         finally:
             await self.stop()
+
+    async def poll_updates(self):
+        """Poll for incoming messages (user commands)"""
+        offset = 0
+        while True:
+            try:
+                async with self.session.get(
+                    f"{self.api_url}/getUpdates",
+                    params={"offset": offset, "timeout": 30}
+                ) as resp:
+                    data = await resp.json()
+                    if data.get("ok"):
+                        for update in data.get("result", []):
+                            offset = update["update_id"] + 1
+                            await self.handle_update(update)
+            except Exception as e:
+                logger.error(f"Error polling updates: {e}")
+                await asyncio.sleep(5)
+
+    async def handle_update(self, update: Dict):
+        """Handle incoming Telegram update"""
+        message = update.get("message", {})
+        text = message.get("text", "")
+        chat_id = message.get("chat", {}).get("id")
+
+        if not chat_id or not text:
+            return
+
+        if text.startswith("/start"):
+            await self.send_welcome_message(str(chat_id))
+        elif text.startswith("/help"):
+            await self.send_help_message(str(chat_id))
+
+    async def send_welcome_message(self, chat_id: str):
+        """Send welcome message with disclaimer to new users"""
+        message = """
+👋 *Welcome to Quantum Trading AI!*
+
+I provide AI-powered crypto trading signals using machine learning analysis.
+
+📊 *What I offer:*
+• Signals for 16+ cryptocurrencies
+• Entry, Stop Loss, and Take Profit levels
+• 4-hourly market scans
+• Risk/reward analysis
+
+📢 *Join our channel:* @QuantumTradingAIX
+
+⚠️ *IMPORTANT RISK WARNING:*
+Trading signals are for *educational purposes only*. This is *not financial advice*. You can lose money trading cryptocurrencies. Past performance does not guarantee future results.
+
+_By using this service, you acknowledge that:_
+• You accept all trading risks
+• You will not trade money you cannot afford to lose
+• You understand this is not financial advice
+• The service is provided "as-is" with no guarantees
+
+*Trade at your own risk.*
+
+Type /help for available commands.
+"""
+        await self.send_message(chat_id, message.strip())
+
+    async def send_help_message(self, chat_id: str):
+        """Send help message"""
+        message = """
+*Quantum Trading AI Commands*
+
+/start - Welcome message and disclaimer
+/help - Show this help message
+
+📢 *Channel:* @QuantumTradingAIX
+🤖 *Bot:* @QuantumAIXRobot
+
+Signals are automatically posted to the channel when trading opportunities are detected.
+
+⚠️ _Not financial advice. Trade responsibly._
+"""
+        await self.send_message(chat_id, message.strip())

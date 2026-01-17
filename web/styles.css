@@ -651,8 +651,8 @@ h1, h2, h3, h4 {
 
 .footer-content {
     display: grid;
-    grid-template-columns: 2fr 1fr 1fr;
-    gap: 60px;
+    grid-template-columns: 2fr 1fr 1fr 1fr;
+    gap: 40px;
     margin-bottom: 40px;
 }
 
@@ -681,6 +681,25 @@ h1, h2, h3, h4 {
 
 .footer-links a:hover {
     color: var(--accent-primary);
+}
+
+.footer-disclaimer {
+    background: rgba(255, 107, 107, 0.1);
+    border: 1px solid rgba(255, 107, 107, 0.3);
+    border-radius: 8px;
+    padding: 20px;
+    margin-bottom: 30px;
+}
+
+.disclaimer-text {
+    color: var(--text-secondary);
+    font-size: 12px;
+    line-height: 1.6;
+    text-align: center;
+}
+
+.disclaimer-text strong {
+    color: #ff6b6b;
 }
 
 .footer-bottom {
