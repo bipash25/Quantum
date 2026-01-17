@@ -242,6 +242,238 @@ async def get_public_recent_signals():
 
 
 # -----------------------------------------------------------------------------
+# DASHBOARD ENDPOINTS (Public - for stats page)
+# -----------------------------------------------------------------------------
+
+class DashboardStats(BaseModel):
+    total_signals: int
+    wins: int
+    losses: int
+    expired: int
+    active: int
+    win_rate: Optional[float]
+    avg_rr_ratio: float
+    avg_confidence: float
+    best_symbol: Optional[str]
+    worst_symbol: Optional[str]
+    total_4h_signals: int
+    total_24h_signals: int
+    last_updated: datetime
+
+class SymbolPerformance(BaseModel):
+    symbol: str
+    total: int
+    wins: int
+    losses: int
+    win_rate: Optional[float]
+    avg_confidence: float
+
+class DailyPerformance(BaseModel):
+    date: str
+    signals: int
+    wins: int
+    losses: int
+    win_rate: Optional[float]
+
+class RecentSignalDetail(BaseModel):
+    id: int
+    symbol: str
+    direction: str
+    timeframe: str
+    confidence: float
+    entry_price: float
+    stop_loss: float
+    take_profit_1: float
+    risk_reward_ratio: float
+    status: str
+    created_at: datetime
+
+@app.get("/public/dashboard", response_model=DashboardStats)
+async def get_dashboard_stats():
+    """Get comprehensive dashboard statistics."""
+    try:
+        with engine.connect() as conn:
+            # Total signals
+            total = conn.execute(text("SELECT COUNT(*) FROM signals")).scalar() or 0
+
+            # Status breakdown
+            status_query = conn.execute(text("""
+                SELECT status, COUNT(*) FROM signals GROUP BY status
+            """))
+            status_counts = {row[0]: row[1] for row in status_query.fetchall()}
+
+            wins = status_counts.get('hit_tp', 0)
+            losses = status_counts.get('hit_sl', 0)
+            expired = status_counts.get('expired', 0)
+            active = status_counts.get('active', 0)
+
+            # Win rate
+            completed = wins + losses
+            win_rate = (wins / completed * 100) if completed > 0 else None
+
+            # Average R:R ratio
+            avg_rr = conn.execute(text(
+                "SELECT AVG(risk_reward_ratio) FROM signals"
+            )).scalar() or 0
+
+            # Average confidence
+            avg_conf = conn.execute(text(
+                "SELECT AVG(confidence) FROM signals"
+            )).scalar() or 0
+
+            # Best/worst symbol by win rate
+            symbol_stats = conn.execute(text("""
+                SELECT symbol,
+                       COUNT(*) as total,
+                       SUM(CASE WHEN status = 'hit_tp' THEN 1 ELSE 0 END) as wins,
+                       SUM(CASE WHEN status = 'hit_sl' THEN 1 ELSE 0 END) as losses
+                FROM signals
+                WHERE status IN ('hit_tp', 'hit_sl')
+                GROUP BY symbol
+                HAVING COUNT(*) >= 3
+                ORDER BY SUM(CASE WHEN status = 'hit_tp' THEN 1 ELSE 0 END)::float /
+                         NULLIF(COUNT(*), 0) DESC
+            """)).fetchall()
+
+            best_symbol = symbol_stats[0][0] if symbol_stats else None
+            worst_symbol = symbol_stats[-1][0] if len(symbol_stats) > 1 else None
+
+            # Timeframe breakdown
+            tf_query = conn.execute(text("""
+                SELECT timeframe, COUNT(*) FROM signals GROUP BY timeframe
+            """))
+            tf_counts = {row[0]: row[1] for row in tf_query.fetchall()}
+
+            total_4h = tf_counts.get('4h', 0)
+            total_24h = tf_counts.get('1d', 0)
+
+        return DashboardStats(
+            total_signals=total,
+            wins=wins,
+            losses=losses,
+            expired=expired,
+            active=active,
+            win_rate=round(win_rate, 1) if win_rate else None,
+            avg_rr_ratio=round(avg_rr, 2),
+            avg_confidence=round(avg_conf, 1),
+            best_symbol=best_symbol,
+            worst_symbol=worst_symbol,
+            total_4h_signals=total_4h,
+            total_24h_signals=total_24h,
+            last_updated=datetime.now(timezone.utc),
+        )
+    except Exception as e:
+        logger.error(f"Error getting dashboard stats: {e}")
+        return DashboardStats(
+            total_signals=0, wins=0, losses=0, expired=0, active=0,
+            win_rate=None, avg_rr_ratio=0, avg_confidence=0,
+            best_symbol=None, worst_symbol=None,
+            total_4h_signals=0, total_24h_signals=0,
+            last_updated=datetime.now(timezone.utc),
+        )
+
+@app.get("/public/dashboard/symbols", response_model=List[SymbolPerformance])
+async def get_symbol_performance():
+    """Get performance breakdown by symbol."""
+    try:
+        with engine.connect() as conn:
+            result = conn.execute(text("""
+                SELECT
+                    symbol,
+                    COUNT(*) as total,
+                    SUM(CASE WHEN status = 'hit_tp' THEN 1 ELSE 0 END) as wins,
+                    SUM(CASE WHEN status = 'hit_sl' THEN 1 ELSE 0 END) as losses,
+                    AVG(confidence) as avg_conf
+                FROM signals
+                GROUP BY symbol
+                ORDER BY COUNT(*) DESC
+            """))
+            rows = result.fetchall()
+
+        return [
+            SymbolPerformance(
+                symbol=row[0],
+                total=row[1],
+                wins=row[2],
+                losses=row[3],
+                win_rate=round(row[2] / (row[2] + row[3]) * 100, 1) if (row[2] + row[3]) > 0 else None,
+                avg_confidence=round(row[4], 1),
+            )
+            for row in rows
+        ]
+    except Exception as e:
+        logger.error(f"Error getting symbol performance: {e}")
+        return []
+
+@app.get("/public/dashboard/daily", response_model=List[DailyPerformance])
+async def get_daily_performance():
+    """Get daily performance for chart."""
+    try:
+        with engine.connect() as conn:
+            result = conn.execute(text("""
+                SELECT
+                    DATE(created_at) as date,
+                    COUNT(*) as signals,
+                    SUM(CASE WHEN status = 'hit_tp' THEN 1 ELSE 0 END) as wins,
+                    SUM(CASE WHEN status = 'hit_sl' THEN 1 ELSE 0 END) as losses
+                FROM signals
+                GROUP BY DATE(created_at)
+                ORDER BY DATE(created_at) DESC
+                LIMIT 30
+            """))
+            rows = result.fetchall()
+
+        return [
+            DailyPerformance(
+                date=str(row[0]),
+                signals=row[1],
+                wins=row[2],
+                losses=row[3],
+                win_rate=round(row[2] / (row[2] + row[3]) * 100, 1) if (row[2] + row[3]) > 0 else None,
+            )
+            for row in reversed(rows)  # Oldest first for chart
+        ]
+    except Exception as e:
+        logger.error(f"Error getting daily performance: {e}")
+        return []
+
+@app.get("/public/dashboard/recent", response_model=List[RecentSignalDetail])
+async def get_recent_signals_detail():
+    """Get last 10 signals with full details for dashboard."""
+    try:
+        with engine.connect() as conn:
+            result = conn.execute(text("""
+                SELECT id, symbol, direction, timeframe, confidence,
+                       entry_price, stop_loss, take_profit_1, risk_reward_ratio,
+                       status, created_at
+                FROM signals
+                ORDER BY created_at DESC
+                LIMIT 10
+            """))
+            rows = result.fetchall()
+
+        return [
+            RecentSignalDetail(
+                id=row[0],
+                symbol=row[1],
+                direction=row[2],
+                timeframe=row[3],
+                confidence=round(row[4], 1),
+                entry_price=row[5],
+                stop_loss=row[6],
+                take_profit_1=row[7],
+                risk_reward_ratio=round(row[8], 2),
+                status=row[9],
+                created_at=row[10],
+            )
+            for row in rows
+        ]
+    except Exception as e:
+        logger.error(f"Error getting recent signals: {e}")
+        return []
+
+
+# -----------------------------------------------------------------------------
 # AUTHENTICATED ENDPOINTS
 # -----------------------------------------------------------------------------
 
