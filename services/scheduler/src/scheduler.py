@@ -58,12 +58,21 @@ ATR_TP1_MULTIPLIER = 2.0
 ATR_TP2_MULTIPLIER = 3.0
 ATR_TP3_MULTIPLIER = 4.5
 
-# Symbols to trade
+# Top 50 Symbols to trade (by market cap)
 SYMBOLS = [
+    # Top 20 (original MVP)
     "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
-    "ADAUSDT", "DOGEUSDT", "DOTUSDT", "AVAXUSDT",
+    "ADAUSDT", "DOGEUSDT", "MATICUSDT", "DOTUSDT", "AVAXUSDT",
     "LINKUSDT", "UNIUSDT", "ATOMUSDT", "LTCUSDT", "NEARUSDT",
-    "ALGOUSDT", "AAVEUSDT",
+    "FTMUSDT", "ALGOUSDT", "AAVEUSDT", "SANDUSDT", "MANAUSDT",
+
+    # Additional 30 (top 50 total)
+    "APTUSDT", "ARBUSDT", "OPUSDT", "INJUSDT", "SUIUSDT",
+    "TIAUSDT", "SEIUSDT", "RUNEUSDT", "RENDERUSDT", "WLDUSDT",
+    "IMXUSDT", "LDOUSDT", "STXUSDT", "FILUSDT", "HBARUSDT",
+    "VETUSDT", "ICPUSDT", "MKRUSDT", "QNTUSDT", "GRTUSDT",
+    "FLOWUSDT", "XLMUSDT", "AXSUSDT", "THETAUSDT", "EGLDUSDT",
+    "APEUSDT", "CHZUSDT", "EOSUSDT", "CFXUSDT", "ZILUSDT",
 ]
 
 
@@ -499,9 +508,10 @@ class SignalScheduler:
         return None
 
     def save_signal_to_db(self, signal: Dict):
-        """Save signal to database for outcome tracking."""
+        """Save signal and its features to database for outcome tracking and RL."""
         try:
-            insert = text("""
+            # Insert signal and get ID
+            insert_signal = text("""
                 INSERT INTO signals (
                     signal_time, symbol, timeframe, direction, confidence,
                     entry_price, stop_loss, take_profit_1, take_profit_2, take_profit_3,
@@ -511,11 +521,14 @@ class SignalScheduler:
                     :entry_price, :stop_loss, :tp1, :tp2, :tp3,
                     :rr, :model_version, :reasoning, 'active', :valid_until
                 )
+                RETURNING id, created_at
             """)
 
+            signal_time = datetime.now(timezone.utc)
+
             with self.engine.begin() as conn:
-                conn.execute(insert, {
-                    "signal_time": datetime.now(timezone.utc),
+                result = conn.execute(insert_signal, {
+                    "signal_time": signal_time,
                     "symbol": signal["symbol"],
                     "timeframe": signal["timeframe"],
                     "direction": signal["direction"],
@@ -530,7 +543,36 @@ class SignalScheduler:
                     "reasoning": signal.get("reasoning", ""),
                     "valid_until": signal["valid_until"],
                 })
-            logger.debug(f"Saved signal for {signal['symbol']} to database")
+                row = result.fetchone()
+                signal_id = row[0]
+                signal_created_at = row[1]
+
+                # Save features for RL foundation
+                features = signal.get("features", {})
+                if features:
+                    insert_feature = text("""
+                        INSERT INTO signal_features (
+                            signal_id, signal_created_at, feature_name,
+                            feature_value, feature_importance, feature_rank
+                        ) VALUES (
+                            :signal_id, :created_at, :name,
+                            :value, :importance, :rank
+                        )
+                        ON CONFLICT (signal_id, signal_created_at, feature_name)
+                        DO UPDATE SET feature_value = EXCLUDED.feature_value
+                    """)
+
+                    for fname, fdata in features.items():
+                        conn.execute(insert_feature, {
+                            "signal_id": signal_id,
+                            "created_at": signal_created_at,
+                            "name": fname,
+                            "value": fdata.get("value"),
+                            "importance": fdata.get("importance"),
+                            "rank": fdata.get("rank"),
+                        })
+
+            logger.debug(f"Saved signal {signal_id} with {len(features)} features for {signal['symbol']}")
         except Exception as e:
             logger.error(f"Failed to save signal to DB: {e}")
 
@@ -714,6 +756,28 @@ _📈 @QuantumTradingAIX_
         now = datetime.now(timezone.utc)
         valid_until = now + timedelta(hours=valid_hours)
 
+        # Extract feature values and importances for RL foundation
+        feature_data = {}
+        for i, fname in enumerate(feature_cols):
+            feature_data[fname] = {
+                "value": float(latest_features[0, i]),
+                "importance": None,  # Will be added if model supports it
+                "rank": None,
+            }
+
+        # Try to get feature importances from model
+        try:
+            long_model = model_data["long"]
+            if hasattr(long_model, "feature_importances_"):
+                importances = long_model.feature_importances_
+                # Create ranking (1 = most important)
+                ranks = len(importances) - np.argsort(np.argsort(importances))
+                for i, fname in enumerate(feature_cols):
+                    feature_data[fname]["importance"] = float(importances[i])
+                    feature_data[fname]["rank"] = int(ranks[i])
+        except Exception as e:
+            logger.debug(f"Could not extract feature importances: {e}")
+
         return {
             "id": str(uuid4()),
             "symbol": symbol,
@@ -729,6 +793,7 @@ _📈 @QuantumTradingAIX_
             "reasoning": generate_reasoning(df, direction),
             "created_at": now.isoformat(),
             "valid_until": valid_until.isoformat(),
+            "features": feature_data,  # Include features for storage
         }
 
     async def run(self):

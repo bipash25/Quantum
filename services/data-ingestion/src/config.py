@@ -27,12 +27,21 @@ class Settings(BaseSettings):
     binance_rest_url: str = "https://api.binance.com"
     binance_ws_url: str = "wss://stream.binance.com:9443"
 
-    # Symbols to track (MVP: top 20)
+    # Symbols to track (Top 50 by market cap)
     symbols: List[str] = Field(default=[
+        # Top 20 (original MVP)
         "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
         "ADAUSDT", "DOGEUSDT", "MATICUSDT", "DOTUSDT", "AVAXUSDT",
         "LINKUSDT", "UNIUSDT", "ATOMUSDT", "LTCUSDT", "NEARUSDT",
         "FTMUSDT", "ALGOUSDT", "AAVEUSDT", "SANDUSDT", "MANAUSDT",
+
+        # Additional 30 (top 50 total)
+        "APTUSDT", "ARBUSDT", "OPUSDT", "INJUSDT", "SUIUSDT",
+        "TIAUSDT", "SEIUSDT", "RUNEUSDT", "RENDERUSDT", "WLDUSDT",
+        "IMXUSDT", "LDOUSDT", "STXUSDT", "FILUSDT", "HBARUSDT",
+        "VETUSDT", "ICPUSDT", "MKRUSDT", "QNTUSDT", "GRTUSDT",
+        "FLOWUSDT", "XLMUSDT", "AXSUSDT", "THETAUSDT", "EGLDUSDT",
+        "APEUSDT", "CHZUSDT", "EOSUSDT", "CFXUSDT", "ZILUSDT",
     ])
 
     # Collection settings

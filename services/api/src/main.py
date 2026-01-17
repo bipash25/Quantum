@@ -471,6 +471,162 @@ async def get_daily_performance():
         logger.error(f"Error getting daily performance: {e}")
         return []
 
+class FeatureImportance(BaseModel):
+    feature_name: str
+    avg_value: float
+    win_avg: float
+    loss_avg: float
+    win_rate: Optional[float]
+    signal_count: int
+    importance_score: float
+
+
+class FeatureDrift(BaseModel):
+    feature_name: str
+    recent_avg: float
+    historical_avg: float
+    drift_percent: float
+    is_significant: bool
+
+
+@app.get("/public/dashboard/features", response_model=List[FeatureImportance])
+async def get_feature_importance():
+    """Get top 10 features by importance (correlation with wins)."""
+    try:
+        with engine.connect() as conn:
+            # Check if signal_features table exists
+            table_exists = conn.execute(text("""
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables
+                    WHERE table_name = 'signal_features'
+                )
+            """)).scalar()
+
+            if not table_exists:
+                return []
+
+            # Get feature importance based on win/loss correlation
+            result = conn.execute(text("""
+                WITH feature_outcomes AS (
+                    SELECT
+                        sf.feature_name,
+                        sf.feature_value,
+                        CASE WHEN s.status IN ('hit_tp', 'hit_tp3') THEN 1 ELSE 0 END as is_win,
+                        CASE WHEN s.status = 'hit_sl' THEN 1 ELSE 0 END as is_loss
+                    FROM signal_features sf
+                    JOIN signals s ON sf.signal_id = s.id AND sf.signal_created_at = s.created_at
+                    WHERE s.status IN ('hit_tp', 'hit_tp3', 'hit_sl')
+                    AND sf.feature_value IS NOT NULL
+                ),
+                feature_stats AS (
+                    SELECT
+                        feature_name,
+                        AVG(feature_value) as avg_value,
+                        AVG(CASE WHEN is_win = 1 THEN feature_value END) as win_avg,
+                        AVG(CASE WHEN is_loss = 1 THEN feature_value END) as loss_avg,
+                        SUM(is_win)::float / NULLIF(SUM(is_win) + SUM(is_loss), 0) * 100 as win_rate,
+                        COUNT(*) as signal_count,
+                        -- Importance score: absolute difference between win and loss averages
+                        ABS(COALESCE(AVG(CASE WHEN is_win = 1 THEN feature_value END), 0) -
+                            COALESCE(AVG(CASE WHEN is_loss = 1 THEN feature_value END), 0)) as importance_score
+                    FROM feature_outcomes
+                    GROUP BY feature_name
+                    HAVING COUNT(*) >= 5  -- Minimum samples
+                )
+                SELECT * FROM feature_stats
+                ORDER BY importance_score DESC
+                LIMIT 10
+            """))
+            rows = result.fetchall()
+
+        return [
+            FeatureImportance(
+                feature_name=row[0],
+                avg_value=round(row[1], 4) if row[1] else 0,
+                win_avg=round(row[2], 4) if row[2] else 0,
+                loss_avg=round(row[3], 4) if row[3] else 0,
+                win_rate=round(row[4], 1) if row[4] else None,
+                signal_count=row[5],
+                importance_score=round(row[6], 4) if row[6] else 0,
+            )
+            for row in rows
+        ]
+    except Exception as e:
+        logger.error(f"Error getting feature importance: {e}")
+        return []
+
+
+@app.get("/public/dashboard/features/drift", response_model=List[FeatureDrift])
+async def get_feature_drift():
+    """Detect feature drift - features behaving differently recently vs historically."""
+    try:
+        with engine.connect() as conn:
+            # Check if signal_features table exists
+            table_exists = conn.execute(text("""
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables
+                    WHERE table_name = 'signal_features'
+                )
+            """)).scalar()
+
+            if not table_exists:
+                return []
+
+            # Compare recent (7 days) vs historical averages
+            result = conn.execute(text("""
+                WITH recent AS (
+                    SELECT feature_name, AVG(feature_value) as recent_avg
+                    FROM signal_features
+                    WHERE created_at >= NOW() - INTERVAL '7 days'
+                    AND feature_value IS NOT NULL
+                    GROUP BY feature_name
+                    HAVING COUNT(*) >= 3
+                ),
+                historical AS (
+                    SELECT feature_name, AVG(feature_value) as historical_avg
+                    FROM signal_features
+                    WHERE created_at < NOW() - INTERVAL '7 days'
+                    AND feature_value IS NOT NULL
+                    GROUP BY feature_name
+                    HAVING COUNT(*) >= 10
+                )
+                SELECT
+                    r.feature_name,
+                    r.recent_avg,
+                    h.historical_avg,
+                    CASE
+                        WHEN h.historical_avg = 0 THEN 0
+                        ELSE ((r.recent_avg - h.historical_avg) / ABS(h.historical_avg)) * 100
+                    END as drift_percent
+                FROM recent r
+                JOIN historical h ON r.feature_name = h.feature_name
+                WHERE ABS(CASE
+                    WHEN h.historical_avg = 0 THEN 0
+                    ELSE ((r.recent_avg - h.historical_avg) / ABS(h.historical_avg)) * 100
+                END) > 20  -- Only show >20% drift
+                ORDER BY ABS(CASE
+                    WHEN h.historical_avg = 0 THEN 0
+                    ELSE ((r.recent_avg - h.historical_avg) / ABS(h.historical_avg)) * 100
+                END) DESC
+                LIMIT 10
+            """))
+            rows = result.fetchall()
+
+        return [
+            FeatureDrift(
+                feature_name=row[0],
+                recent_avg=round(row[1], 4) if row[1] else 0,
+                historical_avg=round(row[2], 4) if row[2] else 0,
+                drift_percent=round(row[3], 1) if row[3] else 0,
+                is_significant=abs(row[3]) > 50 if row[3] else False,  # >50% is significant
+            )
+            for row in rows
+        ]
+    except Exception as e:
+        logger.error(f"Error getting feature drift: {e}")
+        return []
+
+
 @app.get("/public/dashboard/recent", response_model=List[RecentSignalDetail])
 async def get_recent_signals_detail():
     """Get last 10 signals with full details for dashboard."""

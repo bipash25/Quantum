@@ -457,8 +457,12 @@ Type /help for all commands.
 /start - Welcome message and disclaimer
 /help - Show this help message
 
-*Available Symbols:*
-BTC, ETH, BNB, XRP, ADA, SOL, DOGE, DOT, AVAX, LINK, ATOM, LTC, UNI, NEAR, ALGO, AAVE
+*Available Symbols (50):*
+BTC, ETH, SOL, BNB, XRP, ADA, DOGE, MATIC, DOT, AVAX,
+LINK, UNI, ATOM, LTC, NEAR, FTM, ALGO, AAVE, SAND, MANA,
+APT, ARB, OP, INJ, SUI, TIA, SEI, RUNE, RENDER, WLD,
+IMX, LDO, STX, FIL, HBAR, VET, ICP, MKR, QNT, GRT,
+FLOW, XLM, AXS, THETA, EGLD, APE, CHZ, EOS, CFX, ZIL
 
 *Available Timeframes:*
 4H (swing trades), 24H (position trades)
@@ -543,8 +547,8 @@ _Signals matching your filters will be sent to you directly._
 `/symbols BTC,ETH,SOL` - Only receive these
 `/symbols clear` - Clear filter (receive all)
 
-*Available:*
-BTC, ETH, BNB, XRP, ADA, SOL, DOGE, DOT, AVAX, LINK, ATOM, LTC, UNI, NEAR, ALGO, AAVE
+*Available (50 coins):*
+Use /help to see full list
 """
             await self.send_message(chat_id, message.strip())
             return

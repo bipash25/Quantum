@@ -17,6 +17,10 @@ from typing import List
 
 import aiohttp
 import asyncpg
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 
 # Configure logging
@@ -28,13 +32,25 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-# MVP Symbols
-MVP_SYMBOLS = [
+# Top 50 Crypto Symbols by Market Cap
+TOP_50_SYMBOLS = [
+    # Top 20 (original MVP)
     "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
     "ADAUSDT", "DOGEUSDT", "MATICUSDT", "DOTUSDT", "AVAXUSDT",
     "LINKUSDT", "UNIUSDT", "ATOMUSDT", "LTCUSDT", "NEARUSDT",
     "FTMUSDT", "ALGOUSDT", "AAVEUSDT", "SANDUSDT", "MANAUSDT",
+
+    # Additional 30 (top 50 total)
+    "APTUSDT", "ARBUSDT", "OPUSDT", "INJUSDT", "SUIUSDT",
+    "TIAUSDT", "SEIUSDT", "RUNEUSDT", "RENDERUSDT", "WLDUSDT",
+    "IMXUSDT", "LDOUSDT", "STXUSDT", "FILUSDT", "HBARUSDT",
+    "VETUSDT", "ICPUSDT", "MKRUSDT", "QNTUSDT", "GRTUSDT",
+    "FLOWUSDT", "XLMUSDT", "AXSUSDT", "THETAUSDT", "EGLDUSDT",
+    "APEUSDT", "CHZUSDT", "EOSUSDT", "CFXUSDT", "ZILUSDT",
 ]
+
+# Alias for backward compatibility
+MVP_SYMBOLS = TOP_50_SYMBOLS
 
 # Binance API
 BINANCE_API = "https://api.binance.com"
@@ -199,7 +215,17 @@ async def main(args):
 
     # Connect to database
     logger.info("Connecting to database...")
-    pool = await asyncpg.create_pool(**DB_CONFIG, min_size=5, max_size=20)
+    try:
+        pool = await asyncpg.create_pool(**DB_CONFIG, min_size=5, max_size=20)
+    except OSError as e:
+        # Fallback to localhost if hostname resolution fails (common when running outside docker)
+        if DB_CONFIG["host"] not in ("localhost", "127.0.0.1"):
+            logger.warning(f"Failed to connect to {DB_CONFIG['host']}: {e}")
+            logger.info("Attempting fallback to localhost...")
+            DB_CONFIG["host"] = "localhost"
+            pool = await asyncpg.create_pool(**DB_CONFIG, min_size=5, max_size=20)
+        else:
+            raise e
 
     # Create HTTP session
     async with aiohttp.ClientSession() as session:
@@ -235,7 +261,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--days",
         type=int,
-        default=180,
+        default=3650,
         help="Number of days to backfill (default: 180)"
     )
     parser.add_argument(
