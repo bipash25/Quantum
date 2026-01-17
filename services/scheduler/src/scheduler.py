@@ -508,7 +508,7 @@ class SignalScheduler:
         return None
 
     def save_signal_to_db(self, signal: Dict):
-        """Save signal and its features to database for outcome tracking and RL."""
+        """Save signal, features, entry execution, and entry context for RL."""
         try:
             # Insert signal and get ID
             insert_signal = text("""
@@ -571,6 +571,53 @@ class SignalScheduler:
                             "importance": fdata.get("importance"),
                             "rank": fdata.get("rank"),
                         })
+
+                # Record entry execution for RL
+                insert_execution = text("""
+                    INSERT INTO trade_executions (
+                        signal_id, signal_created_at, action, price,
+                        quantity_pct, pnl_percent, cumulative_pnl, timestamp
+                    ) VALUES (
+                        :signal_id, :created_at, 'entry', :price,
+                        100.0, 0.0, 0.0, :timestamp
+                    )
+                """)
+                conn.execute(insert_execution, {
+                    "signal_id": signal_id,
+                    "created_at": signal_created_at,
+                    "price": signal["entry_price"],
+                    "timestamp": signal_time,
+                })
+
+                # Record entry context for RL
+                entry_context = signal.get("entry_context", {})
+                if entry_context:
+                    insert_context = text("""
+                        INSERT INTO trade_context (
+                            signal_id, signal_created_at, context_type,
+                            volatility_regime, trend_direction, volume_profile,
+                            atr_value, atr_percent, volume_ratio, rsi_value,
+                            price, timestamp
+                        ) VALUES (
+                            :signal_id, :created_at, 'entry',
+                            :volatility_regime, :trend_direction, :volume_profile,
+                            :atr_value, :atr_percent, :volume_ratio, :rsi_value,
+                            :price, :timestamp
+                        )
+                    """)
+                    conn.execute(insert_context, {
+                        "signal_id": signal_id,
+                        "created_at": signal_created_at,
+                        "volatility_regime": entry_context.get("volatility_regime"),
+                        "trend_direction": entry_context.get("trend_direction"),
+                        "volume_profile": entry_context.get("volume_profile"),
+                        "atr_value": entry_context.get("atr_value"),
+                        "atr_percent": entry_context.get("atr_percent"),
+                        "volume_ratio": entry_context.get("volume_ratio"),
+                        "rsi_value": entry_context.get("rsi_value"),
+                        "price": signal["entry_price"],
+                        "timestamp": signal_time,
+                    })
 
             logger.debug(f"Saved signal {signal_id} with {len(features)} features for {signal['symbol']}")
         except Exception as e:
@@ -778,6 +825,9 @@ _📈 @QuantumTradingAIX_
         except Exception as e:
             logger.debug(f"Could not extract feature importances: {e}")
 
+        # Calculate entry context for RL training
+        entry_context = self._calculate_market_context(latest, price)
+
         return {
             "id": str(uuid4()),
             "symbol": symbol,
@@ -794,7 +844,57 @@ _📈 @QuantumTradingAIX_
             "created_at": now.isoformat(),
             "valid_until": valid_until.isoformat(),
             "features": feature_data,  # Include features for storage
+            "entry_context": entry_context,  # Include context for RL
         }
+
+    def _calculate_market_context(self, latest: pd.Series, price: float) -> Dict[str, Any]:
+        """Calculate market context (volatility regime, trend, volume) for RL."""
+        try:
+            # ATR percent for volatility regime
+            atr_value = latest.get("atr_14", 0)
+            atr_percent = (atr_value / price * 100) if price > 0 else 0
+
+            # Volatility regime: low (<1%), medium (1-3%), high (>3%)
+            if atr_percent < 1.0:
+                volatility_regime = "low"
+            elif atr_percent < 3.0:
+                volatility_regime = "medium"
+            else:
+                volatility_regime = "high"
+
+            # Trend direction based on EMA position
+            price_vs_ema = latest.get("price_vs_ema_21", latest.get("price_vs_ema_50", 0))
+            if price_vs_ema > 0.01:  # >1% above EMA
+                trend_direction = "bullish"
+            elif price_vs_ema < -0.01:  # >1% below EMA
+                trend_direction = "bearish"
+            else:
+                trend_direction = "sideways"
+
+            # Volume profile based on volume ratio
+            volume_ratio = latest.get("volume_sma_ratio_20", latest.get("volume_ratio", 1.0))
+            if volume_ratio < 0.7:
+                volume_profile = "low"
+            elif volume_ratio > 1.5:
+                volume_profile = "high"
+            else:
+                volume_profile = "normal"
+
+            # RSI value
+            rsi_value = latest.get("rsi_14", 50)
+
+            return {
+                "volatility_regime": volatility_regime,
+                "trend_direction": trend_direction,
+                "volume_profile": volume_profile,
+                "atr_value": float(atr_value) if atr_value else None,
+                "atr_percent": float(atr_percent) if atr_percent else None,
+                "volume_ratio": float(volume_ratio) if volume_ratio else None,
+                "rsi_value": float(rsi_value) if rsi_value else None,
+            }
+        except Exception as e:
+            logger.warning(f"Failed to calculate market context: {e}")
+            return {}
 
     async def run(self):
         """Main run loop"""

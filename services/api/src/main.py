@@ -4,7 +4,7 @@ Quantum Trading AI - REST API Service
 Provides API access for Pro tier users to get signals programmatically.
 """
 from datetime import datetime, timedelta, timezone
-from typing import List, Optional
+from typing import List, Optional, Dict
 import logging
 import os
 
@@ -661,6 +661,189 @@ async def get_recent_signals_detail():
     except Exception as e:
         logger.error(f"Error getting recent signals: {e}")
         return []
+
+
+class ContextWinRate(BaseModel):
+    context_value: str
+    total: int
+    wins: int
+    losses: int
+    win_rate: Optional[float]
+    avg_pnl: float
+
+
+class PartialFillStats(BaseModel):
+    total_signals: int
+    tp1_rate: float
+    tp2_rate: float
+    tp3_rate: float
+    avg_tp1_pnl: float
+    avg_tp2_pnl: float
+    avg_tp3_pnl: float
+
+
+@app.get("/public/dashboard/context-analysis", response_model=Dict)
+async def get_context_analysis():
+    """Get win rate analysis by entry context (volatility, trend, volume)."""
+    try:
+        with engine.connect() as conn:
+            # Check if trade_context table exists and has data
+            table_exists = conn.execute(text("""
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables
+                    WHERE table_name = 'trade_context'
+                )
+            """)).scalar()
+
+            if not table_exists:
+                return {"volatility": [], "trend": [], "volume": []}
+
+            # Win rate by volatility regime
+            volatility_result = conn.execute(text("""
+                SELECT
+                    tc.volatility_regime,
+                    COUNT(*) as total,
+                    COUNT(CASE WHEN o.outcome = 'win' THEN 1 END) as wins,
+                    COUNT(CASE WHEN o.outcome = 'loss' THEN 1 END) as losses,
+                    AVG(o.actual_pnl_percent) as avg_pnl
+                FROM trade_context tc
+                JOIN signal_outcomes o ON tc.signal_id = o.signal_id
+                    AND tc.signal_created_at = o.signal_created_at
+                WHERE tc.context_type = 'entry'
+                    AND tc.volatility_regime IS NOT NULL
+                    AND o.outcome IN ('win', 'loss')
+                GROUP BY tc.volatility_regime
+                ORDER BY COUNT(*) DESC
+            """)).fetchall()
+
+            volatility = [
+                {
+                    "context_value": row[0],
+                    "total": row[1],
+                    "wins": row[2],
+                    "losses": row[3],
+                    "win_rate": round(row[2] / row[1] * 100, 1) if row[1] > 0 else None,
+                    "avg_pnl": round(row[4], 2) if row[4] else 0,
+                }
+                for row in volatility_result
+            ]
+
+            # Win rate by trend direction
+            trend_result = conn.execute(text("""
+                SELECT
+                    tc.trend_direction,
+                    COUNT(*) as total,
+                    COUNT(CASE WHEN o.outcome = 'win' THEN 1 END) as wins,
+                    COUNT(CASE WHEN o.outcome = 'loss' THEN 1 END) as losses,
+                    AVG(o.actual_pnl_percent) as avg_pnl
+                FROM trade_context tc
+                JOIN signal_outcomes o ON tc.signal_id = o.signal_id
+                    AND tc.signal_created_at = o.signal_created_at
+                WHERE tc.context_type = 'entry'
+                    AND tc.trend_direction IS NOT NULL
+                    AND o.outcome IN ('win', 'loss')
+                GROUP BY tc.trend_direction
+                ORDER BY COUNT(*) DESC
+            """)).fetchall()
+
+            trend = [
+                {
+                    "context_value": row[0],
+                    "total": row[1],
+                    "wins": row[2],
+                    "losses": row[3],
+                    "win_rate": round(row[2] / row[1] * 100, 1) if row[1] > 0 else None,
+                    "avg_pnl": round(row[4], 2) if row[4] else 0,
+                }
+                for row in trend_result
+            ]
+
+            # Win rate by volume profile
+            volume_result = conn.execute(text("""
+                SELECT
+                    tc.volume_profile,
+                    COUNT(*) as total,
+                    COUNT(CASE WHEN o.outcome = 'win' THEN 1 END) as wins,
+                    COUNT(CASE WHEN o.outcome = 'loss' THEN 1 END) as losses,
+                    AVG(o.actual_pnl_percent) as avg_pnl
+                FROM trade_context tc
+                JOIN signal_outcomes o ON tc.signal_id = o.signal_id
+                    AND tc.signal_created_at = o.signal_created_at
+                WHERE tc.context_type = 'entry'
+                    AND tc.volume_profile IS NOT NULL
+                    AND o.outcome IN ('win', 'loss')
+                GROUP BY tc.volume_profile
+                ORDER BY COUNT(*) DESC
+            """)).fetchall()
+
+            volume = [
+                {
+                    "context_value": row[0],
+                    "total": row[1],
+                    "wins": row[2],
+                    "losses": row[3],
+                    "win_rate": round(row[2] / row[1] * 100, 1) if row[1] > 0 else None,
+                    "avg_pnl": round(row[4], 2) if row[4] else 0,
+                }
+                for row in volume_result
+            ]
+
+        return {
+            "volatility": volatility,
+            "trend": trend,
+            "volume": volume,
+        }
+    except Exception as e:
+        logger.error(f"Error getting context analysis: {e}")
+        return {"volatility": [], "trend": [], "volume": []}
+
+
+@app.get("/public/dashboard/partial-fills", response_model=PartialFillStats)
+async def get_partial_fill_stats():
+    """Get statistics about TP level hit rates."""
+    try:
+        with engine.connect() as conn:
+            result = conn.execute(text("""
+                SELECT
+                    COUNT(*) as total,
+                    COUNT(CASE WHEN tp1_hit THEN 1 END) as tp1_count,
+                    COUNT(CASE WHEN tp2_hit THEN 1 END) as tp2_count,
+                    COUNT(CASE WHEN tp3_hit THEN 1 END) as tp3_count
+                FROM signal_outcomes
+                WHERE outcome IN ('win', 'loss', 'partial', 'expired')
+            """)).fetchone()
+
+            total = result[0] or 1  # Avoid division by zero
+            tp1_count = result[1] or 0
+            tp2_count = result[2] or 0
+            tp3_count = result[3] or 0
+
+            # Get average P&L for each TP level
+            pnl_result = conn.execute(text("""
+                SELECT
+                    AVG(CASE WHEN tp1_hit AND NOT tp2_hit THEN actual_pnl_percent END) as avg_tp1_pnl,
+                    AVG(CASE WHEN tp2_hit AND NOT tp3_hit THEN actual_pnl_percent END) as avg_tp2_pnl,
+                    AVG(CASE WHEN tp3_hit THEN actual_pnl_percent END) as avg_tp3_pnl
+                FROM signal_outcomes
+                WHERE outcome IN ('win', 'loss', 'partial')
+            """)).fetchone()
+
+        return PartialFillStats(
+            total_signals=total,
+            tp1_rate=round(tp1_count / total * 100, 1) if total > 0 else 0,
+            tp2_rate=round(tp2_count / total * 100, 1) if total > 0 else 0,
+            tp3_rate=round(tp3_count / total * 100, 1) if total > 0 else 0,
+            avg_tp1_pnl=round(pnl_result[0], 2) if pnl_result[0] else 0,
+            avg_tp2_pnl=round(pnl_result[1], 2) if pnl_result[1] else 0,
+            avg_tp3_pnl=round(pnl_result[2], 2) if pnl_result[2] else 0,
+        )
+    except Exception as e:
+        logger.error(f"Error getting partial fill stats: {e}")
+        return PartialFillStats(
+            total_signals=0,
+            tp1_rate=0, tp2_rate=0, tp3_rate=0,
+            avg_tp1_pnl=0, avg_tp2_pnl=0, avg_tp3_pnl=0,
+        )
 
 
 # -----------------------------------------------------------------------------

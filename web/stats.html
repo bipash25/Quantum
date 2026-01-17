@@ -472,6 +472,76 @@
                 </div>
             </div>
 
+            <!-- Entry Condition Analysis Section -->
+            <div class="chart-section" id="context-section">
+                <h2>Entry Condition Analysis (RL Insights)</h2>
+                <p style="color: var(--text-secondary); font-size: 13px; margin-bottom: 20px;">
+                    Win rates by market conditions at signal entry. Helps identify optimal trading conditions.
+                </p>
+
+                <div class="two-columns" style="margin-top: 20px;">
+                    <!-- Volatility Regime -->
+                    <div>
+                        <h3 style="font-size: 14px; margin-bottom: 12px;">By Volatility Regime</h3>
+                        <div class="data-table">
+                            <table>
+                                <thead>
+                                    <tr>
+                                        <th>Regime</th>
+                                        <th>Trades</th>
+                                        <th>Win Rate</th>
+                                        <th>Avg P&L</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="volatility-table">
+                                    <tr><td colspan="4" style="text-align: center; color: var(--text-muted);">Loading...</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    <!-- Trend Direction -->
+                    <div>
+                        <h3 style="font-size: 14px; margin-bottom: 12px;">By Trend Direction</h3>
+                        <div class="data-table">
+                            <table>
+                                <thead>
+                                    <tr>
+                                        <th>Trend</th>
+                                        <th>Trades</th>
+                                        <th>Win Rate</th>
+                                        <th>Avg P&L</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="trend-table">
+                                    <tr><td colspan="4" style="text-align: center; color: var(--text-muted);">Loading...</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Volume Profile -->
+                <div style="margin-top: 20px;">
+                    <h3 style="font-size: 14px; margin-bottom: 12px;">By Volume Profile</h3>
+                    <div class="data-table" style="max-width: 500px;">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Volume</th>
+                                    <th>Trades</th>
+                                    <th>Win Rate</th>
+                                    <th>Avg P&L</th>
+                                </tr>
+                            </thead>
+                            <tbody id="volume-table">
+                                <tr><td colspan="4" style="text-align: center; color: var(--text-muted);">Loading...</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
             <!-- Embed Notice -->
             <div class="embed-notice">
                 <p style="color: var(--text-secondary); font-size: 14px;">
@@ -833,6 +903,53 @@
             }
         }
 
+        // Load entry context analysis (volatility, trend, volume)
+        async function loadContextAnalysis() {
+            try {
+                const response = await fetch(`${API_BASE}/public/dashboard/context-analysis`);
+                const data = await response.json();
+
+                // Helper to render context table
+                function renderContextTable(tableId, items) {
+                    const tbody = document.getElementById(tableId);
+                    if (!items || items.length === 0) {
+                        tbody.innerHTML = '<tr><td colspan="4" style="text-align: center; color: var(--text-muted);">No data yet</td></tr>';
+                        return;
+                    }
+
+                    tbody.innerHTML = items.map(row => `
+                        <tr>
+                            <td class="symbol" style="text-transform: capitalize;">${row.context_value}</td>
+                            <td>${row.total}</td>
+                            <td>
+                                <div class="winrate-bar">
+                                    <div class="bar">
+                                        <div class="fill" style="width: ${row.win_rate || 0}%"></div>
+                                    </div>
+                                    <span class="percent">${row.win_rate !== null ? row.win_rate + '%' : 'N/A'}</span>
+                                </div>
+                            </td>
+                            <td style="color: ${row.avg_pnl >= 0 ? 'var(--success)' : 'var(--danger)'}; font-weight: 600;">
+                                ${row.avg_pnl >= 0 ? '+' : ''}${row.avg_pnl.toFixed(2)}%
+                            </td>
+                        </tr>
+                    `).join('');
+                }
+
+                renderContextTable('volatility-table', data.volatility);
+                renderContextTable('trend-table', data.trend);
+                renderContextTable('volume-table', data.volume);
+
+                // Show/hide section based on data availability
+                const hasData = (data.volatility?.length > 0) || (data.trend?.length > 0) || (data.volume?.length > 0);
+                document.getElementById('context-section').style.display = hasData ? 'block' : 'none';
+
+            } catch (error) {
+                console.error('Failed to load context analysis:', error);
+                document.getElementById('context-section').style.display = 'none';
+            }
+        }
+
         // Load all data
         async function loadAllData() {
             await Promise.all([
@@ -842,6 +959,7 @@
                 loadPerformanceChart(),
                 loadFeatureImportance(),
                 loadFeatureDrift(),
+                loadContextAnalysis(),
             ]);
         }
 

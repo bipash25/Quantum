@@ -2,7 +2,7 @@
 Quantum Trading AI - Signal Outcome Tracker (Enhanced)
 =======================================================
 Monitors active signals, tracks partial TP fills, calculates P&L,
-and sends real-time Telegram updates.
+records trade executions for RL, and sends real-time Telegram updates.
 """
 import asyncio
 import logging
@@ -11,6 +11,7 @@ from typing import Dict, List, Optional, Tuple
 
 import aiohttp
 import pandas as pd
+import numpy as np
 from sqlalchemy import create_engine, text
 
 from .config import settings
@@ -407,6 +408,157 @@ class OutcomeTracker:
                 "status": status,
             })
 
+    def record_trade_execution(
+        self,
+        signal_id: int,
+        signal_created_at: datetime,
+        action: str,
+        price: float,
+        quantity_pct: float,
+        pnl_percent: float,
+        cumulative_pnl: float,
+        timestamp: datetime
+    ):
+        """Record a trade execution (entry, tp1, tp2, tp3, sl, expired) for RL."""
+        insert = text("""
+            INSERT INTO trade_executions (
+                signal_id, signal_created_at, action, price,
+                quantity_pct, pnl_percent, cumulative_pnl, timestamp
+            ) VALUES (
+                :signal_id, :created_at, :action, :price,
+                :quantity_pct, :pnl_percent, :cumulative_pnl, :timestamp
+            )
+        """)
+        try:
+            with self.engine.begin() as conn:
+                conn.execute(insert, {
+                    "signal_id": signal_id,
+                    "created_at": signal_created_at,
+                    "action": action,
+                    "price": price,
+                    "quantity_pct": quantity_pct,
+                    "pnl_percent": pnl_percent,
+                    "cumulative_pnl": cumulative_pnl,
+                    "timestamp": timestamp,
+                })
+            logger.debug(f"Recorded {action} execution for signal {signal_id}")
+        except Exception as e:
+            logger.error(f"Failed to record trade execution: {e}")
+
+    def record_exit_context(
+        self,
+        signal_id: int,
+        signal_created_at: datetime,
+        symbol: str,
+        price: float,
+        timestamp: datetime
+    ):
+        """Record market context at exit time for RL training."""
+        try:
+            # Get recent candles to calculate exit context
+            query = text("""
+                SELECT time, open, high, low, close, volume
+                FROM candles
+                WHERE symbol = :symbol AND timeframe = '1m'
+                AND time <= :timestamp
+                ORDER BY time DESC
+                LIMIT 100
+            """)
+            df = pd.read_sql(query, self.engine, params={
+                "symbol": symbol,
+                "timestamp": timestamp
+            })
+
+            if df.empty:
+                logger.warning(f"No candle data for exit context: {symbol}")
+                return
+
+            df = df.sort_values("time")
+
+            # Calculate context metrics
+            close = df["close"].iloc[-1]
+            high = df["high"]
+            low = df["low"]
+            vol = df["volume"]
+
+            # ATR calculation (simplified 14-period)
+            tr = np.maximum(
+                high - low,
+                np.maximum(
+                    abs(high - df["close"].shift(1)),
+                    abs(low - df["close"].shift(1))
+                )
+            )
+            atr_14 = tr.rolling(14).mean().iloc[-1] if len(tr) >= 14 else tr.mean()
+            atr_percent = (atr_14 / close * 100) if close > 0 else 0
+
+            # Volatility regime
+            if atr_percent < 1.0:
+                volatility_regime = "low"
+            elif atr_percent < 3.0:
+                volatility_regime = "medium"
+            else:
+                volatility_regime = "high"
+
+            # Trend direction (price vs 20-period EMA)
+            ema_20 = df["close"].ewm(span=20).mean().iloc[-1]
+            price_vs_ema = (close / ema_20 - 1) if ema_20 > 0 else 0
+            if price_vs_ema > 0.01:
+                trend_direction = "bullish"
+            elif price_vs_ema < -0.01:
+                trend_direction = "bearish"
+            else:
+                trend_direction = "sideways"
+
+            # Volume profile
+            vol_sma = vol.rolling(20).mean().iloc[-1] if len(vol) >= 20 else vol.mean()
+            volume_ratio = vol.iloc[-1] / vol_sma if vol_sma > 0 else 1.0
+            if volume_ratio < 0.7:
+                volume_profile = "low"
+            elif volume_ratio > 1.5:
+                volume_profile = "high"
+            else:
+                volume_profile = "normal"
+
+            # RSI calculation (14-period)
+            delta = df["close"].diff()
+            gain = delta.where(delta > 0, 0).rolling(14).mean()
+            loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
+            rs = gain.iloc[-1] / loss.iloc[-1] if loss.iloc[-1] > 0 else 0
+            rsi_value = 100 - (100 / (1 + rs)) if rs > 0 else 50
+
+            # Insert exit context
+            insert = text("""
+                INSERT INTO trade_context (
+                    signal_id, signal_created_at, context_type,
+                    volatility_regime, trend_direction, volume_profile,
+                    atr_value, atr_percent, volume_ratio, rsi_value,
+                    price, timestamp
+                ) VALUES (
+                    :signal_id, :created_at, 'exit',
+                    :volatility_regime, :trend_direction, :volume_profile,
+                    :atr_value, :atr_percent, :volume_ratio, :rsi_value,
+                    :price, :timestamp
+                )
+            """)
+            with self.engine.begin() as conn:
+                conn.execute(insert, {
+                    "signal_id": signal_id,
+                    "created_at": signal_created_at,
+                    "volatility_regime": volatility_regime,
+                    "trend_direction": trend_direction,
+                    "volume_profile": volume_profile,
+                    "atr_value": float(atr_14) if not np.isnan(atr_14) else None,
+                    "atr_percent": float(atr_percent) if not np.isnan(atr_percent) else None,
+                    "volume_ratio": float(volume_ratio) if not np.isnan(volume_ratio) else None,
+                    "rsi_value": float(rsi_value) if not np.isnan(rsi_value) else None,
+                    "price": float(price),
+                    "timestamp": timestamp,
+                })
+            logger.debug(f"Recorded exit context for signal {signal_id}")
+        except Exception as e:
+            logger.error(f"Failed to record exit context: {e}")
+
     def get_cumulative_stats(self) -> Dict:
         """Get cumulative performance statistics."""
         query = text("""
@@ -614,12 +766,38 @@ _🤖 @QuantumTradingAIX_"""
                         await self.send_tp_notification(signal, 1, pnl)
                         logger.info(f"{signal['symbol']} hit TP1 ({pnl:+.2f}%)")
 
+                        # Record TP1 execution for RL
+                        self.record_trade_execution(
+                            signal_id=signal["id"],
+                            signal_created_at=signal["created_at"],
+                            action="tp1",
+                            price=float(tp1),
+                            quantity_pct=TP1_POSITION_PCT,
+                            pnl_percent=pnl * (TP1_POSITION_PCT / 100),
+                            cumulative_pnl=pnl * (TP1_POSITION_PCT / 100),
+                            timestamp=outcome.get("tp1_time") or datetime.now(timezone.utc)
+                        )
+
                     if outcome["new_tp2_hit"]:
                         entry = signal["entry_price"]
                         tp2 = signal.get("take_profit_2") or signal["take_profit_1"] * 1.5
                         pnl = ((tp2 - entry) / entry * 100) if signal["direction"] == "LONG" else ((entry - tp2) / entry * 100)
                         await self.send_tp_notification(signal, 2, pnl)
                         logger.info(f"{signal['symbol']} hit TP2 ({pnl:+.2f}%)")
+
+                        # Record TP2 execution for RL
+                        tp1_pnl = ((signal["take_profit_1"] - entry) / entry * 100) if signal["direction"] == "LONG" else ((entry - signal["take_profit_1"]) / entry * 100)
+                        cumulative = tp1_pnl * (TP1_POSITION_PCT / 100) + pnl * (TP2_POSITION_PCT / 100)
+                        self.record_trade_execution(
+                            signal_id=signal["id"],
+                            signal_created_at=signal["created_at"],
+                            action="tp2",
+                            price=float(tp2),
+                            quantity_pct=TP2_POSITION_PCT,
+                            pnl_percent=pnl * (TP2_POSITION_PCT / 100),
+                            cumulative_pnl=cumulative,
+                            timestamp=outcome.get("tp2_time") or datetime.now(timezone.utc)
+                        )
 
                     if outcome["new_tp3_hit"]:
                         entry = signal["entry_price"]
@@ -628,9 +806,75 @@ _🤖 @QuantumTradingAIX_"""
                         await self.send_tp_notification(signal, 3, pnl)
                         logger.info(f"{signal['symbol']} hit TP3 (FULL WIN) ({pnl:+.2f}%)")
 
+                        # Record TP3 execution for RL
+                        self.record_trade_execution(
+                            signal_id=signal["id"],
+                            signal_created_at=signal["created_at"],
+                            action="tp3",
+                            price=float(tp3),
+                            quantity_pct=TP3_POSITION_PCT,
+                            pnl_percent=pnl * (TP3_POSITION_PCT / 100),
+                            cumulative_pnl=outcome["actual_pnl_percent"],
+                            timestamp=outcome.get("tp3_time") or datetime.now(timezone.utc)
+                        )
+
+                        # Record exit context for RL
+                        self.record_exit_context(
+                            signal_id=signal["id"],
+                            signal_created_at=signal["created_at"],
+                            symbol=signal["symbol"],
+                            price=float(tp3),
+                            timestamp=outcome.get("tp3_time") or datetime.now(timezone.utc)
+                        )
+
                     if outcome["sl_hit"]:
                         await self.send_sl_notification(signal, outcome["actual_pnl_percent"])
                         logger.info(f"{signal['symbol']} hit SL ({outcome['actual_pnl_percent']:+.2f}%)")
+
+                        # Record SL execution for RL
+                        sl_price = signal["stop_loss"]
+                        self.record_trade_execution(
+                            signal_id=signal["id"],
+                            signal_created_at=signal["created_at"],
+                            action="sl",
+                            price=float(sl_price),
+                            quantity_pct=100 - (TP1_POSITION_PCT if outcome["tp1_hit"] else 0) - (TP2_POSITION_PCT if outcome["tp2_hit"] else 0),
+                            pnl_percent=outcome["actual_pnl_percent"],
+                            cumulative_pnl=outcome["actual_pnl_percent"],
+                            timestamp=outcome.get("exit_time") or datetime.now(timezone.utc)
+                        )
+
+                        # Record exit context for RL
+                        self.record_exit_context(
+                            signal_id=signal["id"],
+                            signal_created_at=signal["created_at"],
+                            symbol=signal["symbol"],
+                            price=float(sl_price),
+                            timestamp=outcome.get("exit_time") or datetime.now(timezone.utc)
+                        )
+
+                    # Handle expired signals
+                    if outcome["outcome"] == "expired" and not outcome["sl_hit"]:
+                        exit_price = outcome.get("exit_price") or signal["entry_price"]
+                        self.record_trade_execution(
+                            signal_id=signal["id"],
+                            signal_created_at=signal["created_at"],
+                            action="expired",
+                            price=float(exit_price),
+                            quantity_pct=100 - (TP1_POSITION_PCT if outcome["tp1_hit"] else 0) - (TP2_POSITION_PCT if outcome["tp2_hit"] else 0),
+                            pnl_percent=outcome.get("pnl_percent", 0),
+                            cumulative_pnl=outcome["actual_pnl_percent"],
+                            timestamp=outcome.get("exit_time") or datetime.now(timezone.utc)
+                        )
+
+                        # Record exit context for RL
+                        self.record_exit_context(
+                            signal_id=signal["id"],
+                            signal_created_at=signal["created_at"],
+                            symbol=signal["symbol"],
+                            price=float(exit_price),
+                            timestamp=outcome.get("exit_time") or datetime.now(timezone.utc)
+                        )
 
             except Exception as e:
                 logger.error(f"Error checking {signal['symbol']}: {e}", exc_info=True)
