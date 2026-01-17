@@ -1,0 +1,25 @@
+# Data Ingestion Service
+# Binance WebSocket + REST API collector
+
+# Core
+aiohttp>=3.9.0
+websockets>=12.0
+asyncpg>=0.29.0
+redis>=5.0.0
+
+# Data processing
+pandas>=2.1.0
+numpy>=1.26.0
+
+# Configuration
+python-dotenv>=1.0.0
+pydantic>=2.5.0
+pydantic-settings>=2.1.0
+
+# Logging & Monitoring
+structlog>=23.2.0
+prometheus-client>=0.19.0
+
+# Utilities
+orjson>=3.9.0
+tenacity>=8.2.0

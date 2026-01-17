@@ -1,0 +1,409 @@
+#!/usr/bin/env python3
+"""
+Send real signals to Telegram channel
+"""
+import os
+import sys
+import asyncio
+import json
+from datetime import datetime, timedelta, timezone
+from uuid import uuid4
+
+import aiohttp
+import numpy as np
+import pandas as pd
+import joblib
+from sqlalchemy import create_engine, text
+from ta import momentum, trend, volatility
+
+
+# Config - REQUIRED environment variables
+DB_URL = os.environ.get("DATABASE_URL")
+if not DB_URL:
+    db_user = os.environ.get("DB_USER", "")
+    db_pass = os.environ.get("DB_PASSWORD", "")
+    db_host = os.environ.get("DB_HOST", "localhost")
+    db_port = os.environ.get("DB_PORT", "5432")
+    db_name = os.environ.get("DB_NAME", "quantum_trading")
+    if db_user and db_pass:
+        DB_URL = f"postgresql://{db_user}:{db_pass}@{db_host}:{db_port}/{db_name}"
+    else:
+        raise ValueError("DATABASE_URL or DB_USER/DB_PASSWORD environment variables required")
+MODEL_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "models")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHANNEL = os.getenv("TELEGRAM_CHANNEL_ID", "")
+
+# Feature names
+FEATURE_NAMES = [
+    "return_5", "return_15", "return_60", "return_240",
+    "log_return_60", "log_return_240",
+    "atr_7", "atr_14", "atr_pct_14",
+    "volatility_60", "volatility_240",
+    "bb_width_20", "bb_position_20",
+    "rsi_7", "rsi_14", "rsi_21",
+    "macd", "macd_signal", "macd_diff",
+    "roc_5", "roc_10",
+    "stoch_k", "stoch_d",
+    "adx_14",
+    "ema_ratio_8_21", "ema_ratio_21_55",
+    "price_vs_ema_21", "price_vs_ema_55",
+    "trend_strength",
+    "volume_sma_ratio_20", "volume_momentum",
+    "distance_to_high_20", "distance_to_low_20",
+    "range_position",
+]
+
+# ATR multipliers
+ATR_SL_MULTIPLIER = 1.5
+ATR_TP1_MULTIPLIER = 2.0
+ATR_TP2_MULTIPLIER = 3.0
+ATR_TP3_MULTIPLIER = 4.5
+
+
+def compute_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Compute technical features"""
+    df = df.copy()
+    high, low, close, vol = df["high"], df["low"], df["close"], df["volume"]
+
+    for period in [5, 15, 60, 240]:
+        df[f"return_{period}"] = close.pct_change(period)
+    df["log_return_60"] = np.log(close / close.shift(60))
+    df["log_return_240"] = np.log(close / close.shift(240))
+
+    for period in [7, 14]:
+        atr = volatility.AverageTrueRange(high, low, close, window=period)
+        df[f"atr_{period}"] = atr.average_true_range()
+    df["atr_pct_14"] = df["atr_14"] / close * 100
+
+    returns = close.pct_change()
+    df["volatility_60"] = returns.rolling(60).std() * np.sqrt(60)
+    df["volatility_240"] = returns.rolling(240).std() * np.sqrt(240)
+
+    bb = volatility.BollingerBands(close, window=20, window_dev=2)
+    df["bb_width_20"] = (bb.bollinger_hband() - bb.bollinger_lband()) / bb.bollinger_mavg()
+    bb_range = bb.bollinger_hband() - bb.bollinger_lband()
+    df["bb_position_20"] = (close - bb.bollinger_lband()) / (bb_range + 1e-10)
+
+    for period in [7, 14, 21]:
+        rsi = momentum.RSIIndicator(close, window=period)
+        df[f"rsi_{period}"] = rsi.rsi()
+
+    macd_ind = trend.MACD(close, window_slow=26, window_fast=12, window_sign=9)
+    df["macd"] = macd_ind.macd()
+    df["macd_signal"] = macd_ind.macd_signal()
+    df["macd_diff"] = macd_ind.macd_diff()
+
+    for period in [5, 10]:
+        df[f"roc_{period}"] = momentum.ROCIndicator(close, window=period).roc()
+
+    stoch = momentum.StochasticOscillator(high, low, close, window=14, smooth_window=3)
+    df["stoch_k"] = stoch.stoch()
+    df["stoch_d"] = stoch.stoch_signal()
+
+    adx = trend.ADXIndicator(high, low, close, window=14)
+    df["adx_14"] = adx.adx()
+    plus_di = adx.adx_pos()
+    minus_di = adx.adx_neg()
+    df["trend_strength"] = df["adx_14"] * np.sign(plus_di - minus_di) / 100
+
+    ema8 = trend.EMAIndicator(close, window=8).ema_indicator()
+    ema21 = trend.EMAIndicator(close, window=21).ema_indicator()
+    ema55 = trend.EMAIndicator(close, window=55).ema_indicator()
+
+    df["ema_ratio_8_21"] = ema8 / ema21 - 1
+    df["ema_ratio_21_55"] = ema21 / ema55 - 1
+    df["price_vs_ema_21"] = close / ema21 - 1
+    df["price_vs_ema_55"] = close / ema55 - 1
+
+    vol_sma = vol.rolling(20).mean()
+    df["volume_sma_ratio_20"] = vol / (vol_sma + 1e-10)
+    df["volume_momentum"] = vol.pct_change(5)
+
+    high_20 = high.rolling(20).max()
+    low_20 = low.rolling(20).min()
+    df["distance_to_high_20"] = (high_20 - close) / close
+    df["distance_to_low_20"] = (close - low_20) / close
+    df["range_position"] = (close - low_20) / (high_20 - low_20 + 1e-10)
+
+    return df
+
+
+def find_latest_model(symbol: str, timeframe: str):
+    """Find latest model for symbol"""
+    pattern = f"binary_{symbol}_{timeframe}_"
+    matching = []
+
+    for name in os.listdir(MODEL_DIR):
+        if name.startswith(pattern):
+            full_path = os.path.join(MODEL_DIR, name)
+            if os.path.isdir(full_path):
+                matching.append(full_path)
+
+    if not matching:
+        return None
+    return sorted(matching)[-1]
+
+
+def format_signal(signal: dict) -> str:
+    """Format signal as Telegram message"""
+    direction = signal.get("direction", "UNKNOWN")
+    symbol = signal.get("symbol", "???")
+    emoji = "🟢" if direction == "LONG" else "🔴"
+
+    entry = signal.get("entry_price", 0)
+    sl = signal.get("stop_loss", 0)
+    tp1 = signal.get("take_profit_1", 0)
+    tp2 = signal.get("take_profit_2", 0)
+    tp3 = signal.get("take_profit_3", 0)
+    confidence = signal.get("confidence", 0)
+    rr = signal.get("risk_reward", 0)
+    timeframe = signal.get("timeframe", "4h")
+    reasoning = signal.get("reasoning", "Technical analysis")
+    valid_until = signal.get("valid_until", "")
+
+    if direction == "LONG":
+        sl_pct = abs((entry - sl) / entry * 100) if entry > 0 else 0
+        tp1_pct = abs((tp1 - entry) / entry * 100) if entry > 0 else 0
+        tp2_pct = abs((tp2 - entry) / entry * 100) if entry > 0 else 0
+        tp3_pct = abs((tp3 - entry) / entry * 100) if entry > 0 else 0
+    else:
+        sl_pct = abs((sl - entry) / entry * 100) if entry > 0 else 0
+        tp1_pct = abs((entry - tp1) / entry * 100) if entry > 0 else 0
+        tp2_pct = abs((entry - tp2) / entry * 100) if entry > 0 else 0
+        tp3_pct = abs((entry - tp3) / entry * 100) if entry > 0 else 0
+
+    if valid_until:
+        try:
+            dt = datetime.fromisoformat(valid_until.replace('Z', '+00:00'))
+            valid_str = dt.strftime("%H:%M UTC")
+        except:
+            valid_str = valid_until[:16]
+    else:
+        valid_str = "N/A"
+
+    if confidence >= 70:
+        conf_indicator = "🔥"
+    elif confidence >= 60:
+        conf_indicator = "⚡"
+    else:
+        conf_indicator = "📊"
+
+    message = f"""
+{emoji} *{direction} Signal* | {symbol} {conf_indicator}
+
+📊 *Timeframe:* {timeframe.upper()}
+💰 *Entry:* `${entry:.4f}`
+🎯 *Take Profits:*
+   TP1: `${tp1:.4f}` (+{tp1_pct:.1f}%)
+   TP2: `${tp2:.4f}` (+{tp2_pct:.1f}%)
+   TP3: `${tp3:.4f}` (+{tp3_pct:.1f}%)
+🛑 *Stop Loss:* `${sl:.4f}` (-{sl_pct:.1f}%)
+📏 *R:R Ratio:* {rr:.1f}:1
+🎯 *Confidence:* {confidence:.0f}%
+⏰ *Valid Until:* {valid_str}
+
+💡 *Analysis:* {reasoning}
+
+_⚠️ Not financial advice. Trade responsibly._
+_📈 @QuantumTradingAIX_
+"""
+    return message.strip()
+
+
+async def send_telegram_message(text: str):
+    """Send message to Telegram channel"""
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+
+    async with aiohttp.ClientSession() as session:
+        async with session.post(url, json={
+            "chat_id": TELEGRAM_CHANNEL,
+            "text": text,
+            "parse_mode": "Markdown",
+            "disable_web_page_preview": True,
+        }) as resp:
+            data = await resp.json()
+            if data.get("ok"):
+                print("✅ Message sent successfully!")
+                return True
+            else:
+                print(f"❌ Failed to send: {data}")
+                return False
+
+
+def generate_reasoning(df: pd.DataFrame, direction: str) -> str:
+    """Generate human-readable reasoning"""
+    latest = df.iloc[-1]
+    reasons = []
+
+    rsi = latest.get("rsi_14", 50)
+    if direction == "LONG" and rsi < 40:
+        reasons.append(f"RSI oversold ({rsi:.0f})")
+    elif direction == "SHORT" and rsi > 60:
+        reasons.append(f"RSI overbought ({rsi:.0f})")
+
+    macd_diff = latest.get("macd_diff", 0)
+    if direction == "LONG" and macd_diff > 0:
+        reasons.append("MACD bullish")
+    elif direction == "SHORT" and macd_diff < 0:
+        reasons.append("MACD bearish")
+
+    ema_ratio = latest.get("ema_ratio_8_21", 0)
+    if direction == "LONG" and ema_ratio > 0:
+        reasons.append("Short-term uptrend")
+    elif direction == "SHORT" and ema_ratio < 0:
+        reasons.append("Short-term downtrend")
+
+    bb_pos = latest.get("bb_position_20", 0.5)
+    if direction == "LONG" and bb_pos < 0.3:
+        reasons.append("Near lower BB")
+    elif direction == "SHORT" and bb_pos > 0.7:
+        reasons.append("Near upper BB")
+
+    if not reasons:
+        reasons.append("Technical confluence detected")
+
+    return " | ".join(reasons[:3])
+
+
+async def main():
+    """Generate and send signals"""
+    engine = create_engine(DB_URL)
+
+    symbols = [
+        "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
+        "ADAUSDT", "DOGEUSDT", "DOTUSDT", "AVAXUSDT",
+        "LINKUSDT", "UNIUSDT", "ATOMUSDT", "LTCUSDT", "NEARUSDT",
+        "ALGOUSDT", "AAVEUSDT",
+    ]
+
+    timeframe = "4h"
+    offset = "4h"
+    signals = []
+
+    print("=" * 60)
+    print("QUANTUM TRADING AI - Live Signal Generation")
+    print("=" * 60)
+
+    for symbol in symbols:
+        model_path = find_latest_model(symbol, timeframe)
+        if not model_path:
+            continue
+
+        try:
+            long_model = joblib.load(os.path.join(model_path, "long.joblib"))
+            short_model = joblib.load(os.path.join(model_path, "short.joblib"))
+            feature_cols = joblib.load(os.path.join(model_path, "features.joblib"))
+            config = joblib.load(os.path.join(model_path, "config.joblib"))
+        except Exception as e:
+            print(f"{symbol}: Failed to load model")
+            continue
+
+        query = text("""
+            SELECT time, open, high, low, close, volume
+            FROM candles
+            WHERE symbol = :symbol AND timeframe = '1m'
+            ORDER BY time DESC
+            LIMIT 100000
+        """)
+
+        df = pd.read_sql(query, engine, params={"symbol": symbol}, parse_dates=["time"])
+        df = df.sort_values("time").set_index("time")
+
+        df = df.resample(offset).agg({
+            "open": "first", "high": "max", "low": "min",
+            "close": "last", "volume": "sum"
+        }).dropna()
+
+        if len(df) < 100:
+            continue
+
+        df = compute_features(df)
+        latest_features = df[feature_cols].iloc[-1].values.reshape(1, -1)
+        latest_features = np.nan_to_num(latest_features, nan=0.0, posinf=0.0, neginf=0.0)
+
+        long_proba = long_model.predict_proba(latest_features)[0, 1]
+        short_proba = short_model.predict_proba(latest_features)[0, 1]
+
+        long_threshold = config.get("long_threshold", 0.5)
+        short_threshold = config.get("short_threshold", 0.5)
+
+        direction = None
+        confidence = 0
+
+        if long_proba >= long_threshold and long_proba > short_proba:
+            direction = "LONG"
+            confidence = long_proba * 100
+        elif short_proba >= short_threshold:
+            direction = "SHORT"
+            confidence = short_proba * 100
+
+        if direction:
+            latest = df.iloc[-1]
+            price = latest["close"]
+            atr = latest["atr_14"]
+
+            if direction == "LONG":
+                sl = price - atr * ATR_SL_MULTIPLIER
+                tp1 = price + atr * ATR_TP1_MULTIPLIER
+                tp2 = price + atr * ATR_TP2_MULTIPLIER
+                tp3 = price + atr * ATR_TP3_MULTIPLIER
+            else:
+                sl = price + atr * ATR_SL_MULTIPLIER
+                tp1 = price - atr * ATR_TP1_MULTIPLIER
+                tp2 = price - atr * ATR_TP2_MULTIPLIER
+                tp3 = price - atr * ATR_TP3_MULTIPLIER
+
+            risk = abs(price - sl)
+            reward = abs(tp2 - price)
+            rr = reward / risk if risk > 0 else 0
+
+            now = datetime.now(timezone.utc)
+            valid_until = now + timedelta(hours=4)
+
+            signal = {
+                "id": str(uuid4()),
+                "symbol": symbol,
+                "direction": direction,
+                "timeframe": timeframe,
+                "entry_price": price,
+                "stop_loss": sl,
+                "take_profit_1": tp1,
+                "take_profit_2": tp2,
+                "take_profit_3": tp3,
+                "confidence": confidence,
+                "risk_reward": rr,
+                "reasoning": generate_reasoning(df, direction),
+                "valid_until": valid_until.isoformat(),
+            }
+            signals.append(signal)
+            print(f"✅ {symbol}: {direction} signal generated (conf: {confidence:.1f}%)")
+        else:
+            print(f"⚪ {symbol}: No signal")
+
+    print(f"\n📊 Total signals: {len(signals)}")
+
+    if signals:
+        print("\n📤 Sending signals to Telegram...\n")
+        for signal in signals:
+            message = format_signal(signal)
+            await send_telegram_message(message)
+            await asyncio.sleep(1)  # Rate limiting
+    else:
+        print("\n⚠️ No signals to send")
+
+        # Send a status message instead
+        status_msg = """
+📊 *Quantum Trading AI - Status Update*
+
+🔍 Scanned 16 crypto pairs
+⏱ Timeframe: 4H
+📉 No strong signals detected at this time
+
+_The market is quiet. Stay tuned for the next update!_
+_📈 @QuantumTradingAIX_
+"""
+        await send_telegram_message(status_msg.strip())
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

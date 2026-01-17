@@ -1,0 +1,39 @@
+# Quantum Trading AI - Prometheus Configuration
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  # Prometheus self-monitoring
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  # API service metrics
+  - job_name: 'quantum-api'
+    static_configs:
+      - targets: ['api:8000']
+    metrics_path: /metrics
+
+  # Data ingestion service
+  - job_name: 'quantum-data-ingestion'
+    static_configs:
+      - targets: ['data-ingestion:8001']
+    metrics_path: /metrics
+
+  # Signal generator
+  - job_name: 'quantum-signal-generator'
+    static_configs:
+      - targets: ['signal-generator:8002']
+    metrics_path: /metrics
+
+  # Redis metrics (via redis_exporter if added later)
+  # - job_name: 'redis'
+  #   static_configs:
+  #     - targets: ['redis-exporter:9121']
+
+  # PostgreSQL metrics (via postgres_exporter if added later)
+  # - job_name: 'postgresql'
+  #   static_configs:
+  #     - targets: ['postgres-exporter:9187']

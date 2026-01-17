@@ -1,0 +1,290 @@
+services:
+  # =============================================================================
+  # DATABASE: TimescaleDB (PostgreSQL with time-series extensions)
+  # =============================================================================
+  timescaledb:
+    image: timescale/timescaledb:latest-pg15
+    container_name: quantum_timescaledb
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${DB_USER:?DB_USER not set}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD not set}
+      POSTGRES_DB: ${DB_NAME:?DB_NAME not set}
+    # SECURITY: Only expose to localhost, not public internet
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - timescale_data:/var/lib/postgresql/data
+      - ./shared/db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - quantum_network
+
+  # =============================================================================
+  # CACHE & MESSAGE BROKER: Redis
+  # =============================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: quantum_redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes --maxmemory 2gb --maxmemory-policy allkeys-lru
+    # SECURITY: Only expose to localhost, not public internet
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - quantum_network
+
+  # =============================================================================
+  # DATA INGESTION: Collects real-time data from Binance
+  # =============================================================================
+  data-ingestion:
+    build:
+      context: ./services/data-ingestion
+      dockerfile: Dockerfile
+    container_name: quantum_data_ingestion
+    restart: unless-stopped
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      - DB_HOST=timescaledb
+      - DB_PORT=5432
+      - DB_USER=${DB_USER}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - DB_NAME=${DB_NAME}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    volumes:
+      - ./data/logs:/app/logs
+    networks:
+      - quantum_network
+
+  # =============================================================================
+  # SIGNAL GENERATOR: Generates trading signals from ML models
+  # =============================================================================
+  signal-generator:
+    build:
+      context: ./services/signal-generator
+      dockerfile: Dockerfile
+    container_name: quantum_signal_generator
+    restart: unless-stopped
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      - DB_HOST=timescaledb
+      - DB_PORT=5432
+      - DB_USER=${DB_USER}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - DB_NAME=${DB_NAME}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - MODEL_DIR=/app/models
+      - SIGNAL_TIMEFRAME=4h
+      - GENERATION_INTERVAL=14400
+      - MIN_CONFIDENCE=0.30
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    volumes:
+      - ./data/models:/app/models:ro
+      - ./data/logs:/app/logs
+    networks:
+      - quantum_network
+
+  # =============================================================================
+  # TELEGRAM BOT: Signal delivery via Telegram
+  # =============================================================================
+  telegram-bot:
+    build:
+      context: ./services/telegram-bot
+      dockerfile: Dockerfile
+    container_name: quantum_telegram_bot
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:?TELEGRAM_BOT_TOKEN not set}
+      - TELEGRAM_CHANNEL_ID=${TELEGRAM_CHANNEL_ID:?TELEGRAM_CHANNEL_ID not set}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    volumes:
+      - ./data/logs:/app/logs
+    networks:
+      - quantum_network
+
+  # =============================================================================
+  # SCHEDULER: Runs signal generation on a schedule
+  # =============================================================================
+  scheduler:
+    build:
+      context: ./services/scheduler
+      dockerfile: Dockerfile
+    container_name: quantum_scheduler
+    restart: unless-stopped
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      - DB_HOST=timescaledb
+      - DB_PORT=5432
+      - DB_USER=${DB_USER}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - DB_NAME=${DB_NAME}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - TELEGRAM_CHANNEL_ID=${TELEGRAM_CHANNEL_ID}
+      - MODEL_DIR=/app/models
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    volumes:
+      - ./data/models:/app/models:ro
+      - ./data/logs:/app/logs
+    networks:
+      - quantum_network
+
+  # =============================================================================
+  # OUTCOME TRACKER: Monitors signals and tracks TP/SL outcomes
+  # =============================================================================
+  outcome-tracker:
+    build:
+      context: ./services/outcome-tracker
+      dockerfile: Dockerfile
+    container_name: quantum_outcome_tracker
+    restart: unless-stopped
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    environment:
+      - DATABASE_URL=postgresql://${DB_USER}:${DB_PASSWORD}@timescaledb:5432/${DB_NAME}
+      - REDIS_URL=redis://redis:6379/0
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:?TELEGRAM_BOT_TOKEN not set}
+      - TELEGRAM_CHANNEL_ID=${TELEGRAM_CHANNEL_ID:?TELEGRAM_CHANNEL_ID not set}
+      - CHECK_INTERVAL=60
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    volumes:
+      - ./data/logs:/app/logs
+    networks:
+      - quantum_network
+
+  # =============================================================================
+  # WEB: Nginx serving landing page
+  # =============================================================================
+  web:
+    image: nginx:alpine
+    container_name: quantum_web
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    volumes:
+      - ./web:/usr/share/nginx/html:ro
+      - ./web/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    networks:
+      - quantum_network
+
+  # =============================================================================
+  # API: REST API for Pro tier users
+  # =============================================================================
+  api:
+    build:
+      context: ./services/api
+      dockerfile: Dockerfile
+    container_name: quantum_api
+    restart: unless-stopped
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql://${DB_USER}:${DB_PASSWORD}@timescaledb:5432/${DB_NAME}
+      - REDIS_URL=redis://redis:6379/0
+      - JWT_SECRET=${JWT_SECRET}
+      - API_KEYS=${API_KEYS}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    networks:
+      - quantum_network
+
+  # =============================================================================
+  # PROMETHEUS: Metrics collection
+  # =============================================================================
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: quantum_prometheus
+    restart: unless-stopped
+    # SECURITY: Only expose to localhost
+    ports:
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+    networks:
+      - quantum_network
+
+  # =============================================================================
+  # GRAFANA: Dashboards and visualization
+  # =============================================================================
+  grafana:
+    image: grafana/grafana:latest
+    container_name: quantum_grafana
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+      - timescaledb
+    # SECURITY: Only expose to localhost (use reverse proxy for public access)
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD}
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_INSTALL_PLUGINS=grafana-piechart-panel
+      # Pass DB credentials to Grafana for datasource provisioning
+      - DB_USER=${DB_USER}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - DB_NAME=${DB_NAME}
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    networks:
+      - quantum_network
+
+# =============================================================================
+# NETWORKS
+# =============================================================================
+networks:
+  quantum_network:
+    driver: bridge
+
+# =============================================================================
+# VOLUMES
+# =============================================================================
+volumes:
+  timescale_data:
+  redis_data:
+  prometheus_data:
+  grafana_data:

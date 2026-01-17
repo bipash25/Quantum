@@ -1,0 +1,90 @@
+# =============================================================================
+# Quantum Trading AI - Git Ignore
+# =============================================================================
+
+# Environment files (NEVER commit these)
+.env
+.env.local
+.env.production
+*.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+ENV/
+env/
+.venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+.settings/
+
+# Jupyter Notebooks
+.ipynb_checkpoints/
+
+# Data files (too large for git)
+data/backups/*
+data/models/*/
+data/logs/*
+*.csv
+*.parquet
+*.feather
+!data/.gitkeep
+
+# Keep directory structure
+!data/backups/.gitkeep
+!data/models/.gitkeep
+!data/logs/.gitkeep
+
+# Docker
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets
+*.pem
+*.key
+credentials.json
+secrets.json
+
+# ML artifacts
+mlruns/
+mlflow.db
+
+# Test artifacts
+.coverage
+htmlcov/
+.pytest_cache/
+.tox/
+
+# Session files
+session-*.md
