@@ -123,6 +123,128 @@ async def verify_api_key(x_api_key: str = Header(...)):
 # ENDPOINTS
 # =============================================================================
 
+# -----------------------------------------------------------------------------
+# PUBLIC ENDPOINTS (No auth required - for landing page)
+# -----------------------------------------------------------------------------
+
+class PublicStatsResponse(BaseModel):
+    total_signals: int
+    active_signals: int
+    completed_signals: int
+    win_count: int
+    loss_count: int
+    win_rate: Optional[float]
+    avg_confidence: float
+    symbols_tracked: int
+    last_signal_time: Optional[datetime]
+
+class PublicSignalPreview(BaseModel):
+    symbol: str
+    direction: str
+    timeframe: str
+    confidence: float
+    created_at: datetime
+    status: str
+
+class PublicRecentSignals(BaseModel):
+    signals: List[PublicSignalPreview]
+
+@app.get("/public/stats", response_model=PublicStatsResponse)
+async def get_public_stats():
+    """Public stats for landing page - no authentication required."""
+    try:
+        with engine.connect() as conn:
+            # Get total signals
+            total = conn.execute(text("SELECT COUNT(*) FROM signals")).scalar() or 0
+
+            # Get active signals
+            active = conn.execute(text("SELECT COUNT(*) FROM signals WHERE status = 'active'")).scalar() or 0
+
+            # Get completed signals (hit_tp or hit_sl)
+            completed = conn.execute(text(
+                "SELECT COUNT(*) FROM signals WHERE status IN ('hit_tp', 'hit_sl', 'expired')"
+            )).scalar() or 0
+
+            # Get win/loss counts
+            wins = conn.execute(text("SELECT COUNT(*) FROM signals WHERE status = 'hit_tp'")).scalar() or 0
+            losses = conn.execute(text("SELECT COUNT(*) FROM signals WHERE status = 'hit_sl'")).scalar() or 0
+
+            # Calculate win rate (only if we have completed trades)
+            total_completed = wins + losses
+            win_rate = (wins / total_completed * 100) if total_completed > 0 else None
+
+            # Get average confidence
+            avg_conf = conn.execute(text("SELECT AVG(confidence) FROM signals")).scalar() or 0
+
+            # Get symbols count
+            symbols = conn.execute(text("SELECT COUNT(DISTINCT symbol) FROM signals")).scalar() or 16
+
+            # Get last signal time
+            last_time = conn.execute(text(
+                "SELECT created_at FROM signals ORDER BY created_at DESC LIMIT 1"
+            )).scalar()
+
+        return PublicStatsResponse(
+            total_signals=total,
+            active_signals=active,
+            completed_signals=completed,
+            win_count=wins,
+            loss_count=losses,
+            win_rate=round(win_rate, 1) if win_rate else None,
+            avg_confidence=round(avg_conf, 1),
+            symbols_tracked=symbols if symbols > 0 else 16,
+            last_signal_time=last_time,
+        )
+    except Exception as e:
+        logger.error(f"Error getting public stats: {e}")
+        # Return default stats on error
+        return PublicStatsResponse(
+            total_signals=0,
+            active_signals=0,
+            completed_signals=0,
+            win_count=0,
+            loss_count=0,
+            win_rate=None,
+            avg_confidence=0,
+            symbols_tracked=16,
+            last_signal_time=None,
+        )
+
+@app.get("/public/recent", response_model=PublicRecentSignals)
+async def get_public_recent_signals():
+    """Get recent signals preview for landing page - sanitized, no sensitive data."""
+    try:
+        with engine.connect() as conn:
+            result = conn.execute(text("""
+                SELECT symbol, direction, timeframe, confidence, created_at, status
+                FROM signals
+                ORDER BY created_at DESC
+                LIMIT 3
+            """))
+            rows = result.fetchall()
+
+        signals = [
+            PublicSignalPreview(
+                symbol=row[0],
+                direction=row[1],
+                timeframe=row[2],
+                confidence=round(row[3], 1),
+                created_at=row[4],
+                status=row[5],
+            )
+            for row in rows
+        ]
+
+        return PublicRecentSignals(signals=signals)
+    except Exception as e:
+        logger.error(f"Error getting recent signals: {e}")
+        return PublicRecentSignals(signals=[])
+
+
+# -----------------------------------------------------------------------------
+# AUTHENTICATED ENDPOINTS
+# -----------------------------------------------------------------------------
+
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
     """Health check endpoint."""

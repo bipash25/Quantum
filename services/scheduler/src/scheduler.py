@@ -1,10 +1,11 @@
 """
 Quantum Trading AI - Scheduled Signal Generator
 ================================================
-Runs signal generation on a 4-hour schedule aligned with candle closes.
+Runs signal generation on a 4-hour and 24-hour schedule aligned with candle closes.
 
 Schedule:
 - 4H candles close at: 00:00, 04:00, 08:00, 12:00, 16:00, 20:00 UTC
+- 24H candles close at: 00:00 UTC
 - We run signals 5 minutes after each close to ensure data is complete
 """
 import asyncio
@@ -315,7 +316,7 @@ def generate_reasoning(df: pd.DataFrame, direction: str) -> str:
 
 
 def format_signal(signal: dict) -> str:
-    """Format signal as Telegram message"""
+    """Format signal as Telegram message with clear timeframe label"""
     direction = signal.get("direction", "UNKNOWN")
     symbol = signal.get("symbol", "???")
     emoji = "🟢" if direction == "LONG" else "🔴"
@@ -330,6 +331,14 @@ def format_signal(signal: dict) -> str:
     timeframe = signal.get("timeframe", "4h")
     reasoning = signal.get("reasoning", "Technical analysis")
     valid_until = signal.get("valid_until", "")
+
+    # Determine timeframe label and trade type
+    if timeframe.lower() in ["1d", "24h"]:
+        tf_label = "[24H SIGNAL]"
+        trade_type = "Position Trade"
+    else:
+        tf_label = "[4H SIGNAL]"
+        trade_type = "Swing Trade"
 
     if direction == "LONG":
         sl_pct = abs((entry - sl) / entry * 100) if entry > 0 else 0
@@ -359,9 +368,9 @@ def format_signal(signal: dict) -> str:
         conf_indicator = "📊"
 
     message = f"""
-{emoji} *{direction} Signal* | {symbol} {conf_indicator}
+{tf_label} {emoji} *{direction}* | {symbol} {conf_indicator}
 
-📊 *Timeframe:* {timeframe.upper()}
+📊 *Timeframe:* {timeframe.upper()} ({trade_type})
 💰 *Entry:* `${entry:.4f}`
 🎯 *Take Profits:*
    TP1: `${tp1:.4f}` (+{tp1_pct:.1f}%)
@@ -381,36 +390,45 @@ _📈 @QuantumTradingAIX_
 
 
 class SignalScheduler:
-    """Scheduler for automated signal generation"""
+    """Scheduler for automated signal generation (4H and 24H)"""
 
     def __init__(self):
         self.engine = create_engine(settings.database_url)
         self.redis_client = redis.Redis.from_url(settings.redis_url)
         self.scheduler = AsyncIOScheduler()
         self.session: Optional[aiohttp.ClientSession] = None
-        self.models: Dict[str, Dict] = {}
+        self.models_4h: Dict[str, Dict] = {}
+        self.models_1d: Dict[str, Dict] = {}
 
     async def start(self):
         """Initialize the scheduler"""
         self.session = aiohttp.ClientSession()
 
-        # Load all models
+        # Load all models (4H and 24H)
         self.load_all_models()
 
-        # Schedule signal generation at 5 minutes past each 4-hour candle close
+        # Schedule 4H signal generation at 5 minutes past each 4-hour candle close
         # 00:05, 04:05, 08:05, 12:05, 16:05, 20:05 UTC
         self.scheduler.add_job(
-            self.generate_and_send_signals,
+            self.generate_and_send_signals_4h,
             CronTrigger(hour="0,4,8,12,16,20", minute=5),
-            id="signal_generation",
+            id="signal_generation_4h",
             name="4H Signal Generation",
         )
 
-        # Also run immediately on startup
-        await self.generate_and_send_signals()
+        # Schedule 24H signal generation at 00:05 UTC (daily candle close)
+        self.scheduler.add_job(
+            self.generate_and_send_signals_1d,
+            CronTrigger(hour=0, minute=5),
+            id="signal_generation_1d",
+            name="24H Signal Generation",
+        )
+
+        # Also run 4H immediately on startup
+        await self.generate_and_send_signals_4h()
 
         self.scheduler.start()
-        logger.info("Scheduler started")
+        logger.info("Scheduler started - 4H (every 4 hours) + 24H (daily at 00:05 UTC)")
 
     async def stop(self):
         """Shutdown the scheduler"""
@@ -419,27 +437,47 @@ class SignalScheduler:
             await self.session.close()
 
     def load_all_models(self):
-        """Load all trained models"""
+        """Load all trained models (4H and 24H)"""
         model_dir = settings.model_dir
 
         for symbol in SYMBOLS:
-            model_path = self._find_latest_model(symbol, "4h")
-            if not model_path:
-                logger.warning(f"No model found for {symbol}")
-                continue
+            # Load 4H models
+            model_path_4h = self._find_latest_model(symbol, "4h")
+            if model_path_4h:
+                try:
+                    is_v2 = "v2_" in os.path.basename(model_path_4h)
+                    self.models_4h[symbol] = {
+                        "long": joblib.load(os.path.join(model_path_4h, "long.joblib")),
+                        "short": joblib.load(os.path.join(model_path_4h, "short.joblib")),
+                        "features": joblib.load(os.path.join(model_path_4h, "features.joblib")),
+                        "config": joblib.load(os.path.join(model_path_4h, "config.joblib")),
+                        "is_v2": is_v2,
+                    }
+                    logger.info(f"Loaded 4H {'v2' if is_v2 else 'v1'} model for {symbol}")
+                except Exception as e:
+                    logger.error(f"Failed to load 4H model for {symbol}: {e}")
+            else:
+                logger.warning(f"No 4H model found for {symbol}")
 
-            try:
-                is_v2 = "v2_" in os.path.basename(model_path)
-                self.models[symbol] = {
-                    "long": joblib.load(os.path.join(model_path, "long.joblib")),
-                    "short": joblib.load(os.path.join(model_path, "short.joblib")),
-                    "features": joblib.load(os.path.join(model_path, "features.joblib")),
-                    "config": joblib.load(os.path.join(model_path, "config.joblib")),
-                    "is_v2": is_v2,
-                }
-                logger.info(f"Loaded {'v2' if is_v2 else 'v1'} model for {symbol}")
-            except Exception as e:
-                logger.error(f"Failed to load model for {symbol}: {e}")
+            # Load 24H (1d) models
+            model_path_1d = self._find_latest_model(symbol, "1d")
+            if model_path_1d:
+                try:
+                    is_v2 = "v2_" in os.path.basename(model_path_1d)
+                    self.models_1d[symbol] = {
+                        "long": joblib.load(os.path.join(model_path_1d, "long.joblib")),
+                        "short": joblib.load(os.path.join(model_path_1d, "short.joblib")),
+                        "features": joblib.load(os.path.join(model_path_1d, "features.joblib")),
+                        "config": joblib.load(os.path.join(model_path_1d, "config.joblib")),
+                        "is_v2": is_v2,
+                    }
+                    logger.info(f"Loaded 24H {'v2' if is_v2 else 'v1'} model for {symbol}")
+                except Exception as e:
+                    logger.error(f"Failed to load 24H model for {symbol}: {e}")
+            else:
+                logger.warning(f"No 24H model found for {symbol}")
+
+        logger.info(f"Loaded {len(self.models_4h)} 4H models and {len(self.models_1d)} 24H models")
 
     def _find_latest_model(self, symbol: str, timeframe: str) -> Optional[str]:
         """Find latest model for symbol - prefers v2 models"""
@@ -516,27 +554,52 @@ class SignalScheduler:
             logger.error(f"Failed to send to Telegram: {e}")
         return False
 
-    async def generate_and_send_signals(self):
+    async def generate_and_send_signals_4h(self):
+        """Generate 4H signals for all symbols and send to Telegram"""
+        await self._generate_and_send_signals(
+            models=self.models_4h,
+            timeframe="4h",
+            offset="4h",
+            valid_hours=4,
+            signal_type="4H"
+        )
+
+    async def generate_and_send_signals_1d(self):
+        """Generate 24H (daily) signals for all symbols and send to Telegram"""
+        await self._generate_and_send_signals(
+            models=self.models_1d,
+            timeframe="1d",
+            offset="1D",
+            valid_hours=24,
+            signal_type="24H"
+        )
+
+    async def _generate_and_send_signals(
+        self,
+        models: Dict[str, Dict],
+        timeframe: str,
+        offset: str,
+        valid_hours: int,
+        signal_type: str
+    ):
         """Generate signals for all symbols and send to Telegram"""
         now = datetime.now(timezone.utc)
-        logger.info(f"Starting signal generation at {now.isoformat()}")
+        logger.info(f"Starting {signal_type} signal generation at {now.isoformat()}")
 
         signals = []
-        timeframe = "4h"
-        offset = "4h"
 
         for symbol in SYMBOLS:
-            if symbol not in self.models:
+            if symbol not in models:
                 continue
 
             try:
-                signal = self._generate_signal(symbol, timeframe, offset)
+                signal = self._generate_signal(symbol, timeframe, offset, models, valid_hours)
                 if signal:
                     signals.append(signal)
             except Exception as e:
-                logger.error(f"Error generating signal for {symbol}: {e}")
+                logger.error(f"Error generating {signal_type} signal for {symbol}: {e}")
 
-        logger.info(f"Generated {len(signals)} signals")
+        logger.info(f"Generated {len(signals)} {signal_type} signals")
 
         if signals:
             # Send each signal to Telegram and save to database
@@ -556,10 +619,10 @@ class SignalScheduler:
         else:
             # Send status update if no signals
             status = f"""
-📊 *Quantum Trading AI - Update*
+📊 *Quantum Trading AI - {signal_type} Update*
 
 🔍 Scanned {len(SYMBOLS)} crypto pairs
-⏱ Timeframe: 4H
+⏱ Timeframe: {timeframe.upper()}
 📉 No strong signals at {now.strftime('%H:%M UTC')}
 
 _Market conditions not favorable. Stay tuned!_
@@ -568,10 +631,10 @@ _📈 @QuantumTradingAIX_
             await self.send_telegram_message(status.strip())
 
     def _generate_signal(
-        self, symbol: str, timeframe: str, offset: str
+        self, symbol: str, timeframe: str, offset: str, models: Dict[str, Dict], valid_hours: int
     ) -> Optional[Dict]:
         """Generate signal for a single symbol"""
-        model_data = self.models.get(symbol)
+        model_data = models.get(symbol)
         if not model_data:
             return None
 
@@ -651,7 +714,7 @@ _📈 @QuantumTradingAIX_
         rr = reward / risk if risk > 0 else 0
 
         now = datetime.now(timezone.utc)
-        valid_until = now + timedelta(hours=4)
+        valid_until = now + timedelta(hours=valid_hours)
 
         return {
             "id": str(uuid4()),

@@ -300,24 +300,57 @@ h1, h2, h3, h4 {
 }
 
 /* ================================================
-   Signal Preview
+   Recent Signals Section
    ================================================ */
 
-.signal-preview {
-    padding: 40px 0 var(--section-padding);
+.recent-signals {
+    padding: 60px 0 var(--section-padding);
 }
 
-.signal-card {
-    max-width: 400px;
+.signals-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 24px;
+    max-width: 1000px;
     margin: 0 auto;
+}
+
+.signal-card-mini {
     background: var(--bg-card);
     border: 1px solid var(--border);
     border-radius: 16px;
     overflow: hidden;
-    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+    transition: all 0.3s ease;
 }
 
-.signal-header {
+.signal-card-mini:hover {
+    transform: translateY(-4px);
+    border-color: var(--accent-primary);
+    box-shadow: 0 10px 40px rgba(99, 102, 241, 0.15);
+}
+
+.signal-card-mini.loading {
+    min-height: 180px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.skeleton {
+    width: 60%;
+    height: 20px;
+    background: linear-gradient(90deg, var(--bg-secondary) 25%, var(--bg-card-hover) 50%, var(--bg-secondary) 75%);
+    background-size: 200% 100%;
+    animation: shimmer 1.5s infinite;
+    border-radius: 4px;
+}
+
+@keyframes shimmer {
+    0% { background-position: 200% 0; }
+    100% { background-position: -200% 0; }
+}
+
+.signal-mini-header {
     display: flex;
     align-items: center;
     gap: 12px;
@@ -346,6 +379,208 @@ h1, h2, h3, h4 {
 .signal-pair {
     font-weight: 700;
     font-size: 16px;
+}
+
+.signal-mini-body {
+    padding: 16px 20px;
+}
+
+.signal-mini-row {
+    display: flex;
+    justify-content: space-between;
+    padding: 8px 0;
+    font-size: 14px;
+    border-bottom: 1px solid var(--border);
+}
+
+.signal-mini-row:last-child {
+    border-bottom: none;
+}
+
+.signal-mini-row span:first-child {
+    color: var(--text-secondary);
+}
+
+.confidence.high {
+    color: var(--success);
+    font-weight: 600;
+}
+
+.confidence.medium {
+    color: #f59e0b;
+    font-weight: 600;
+}
+
+.confidence.low {
+    color: var(--text-secondary);
+}
+
+.status.active {
+    color: var(--success);
+}
+
+.status.hit_tp {
+    color: var(--success);
+}
+
+.status.hit_sl {
+    color: var(--danger);
+}
+
+.status.expired {
+    color: var(--text-muted);
+}
+
+.signal-mini-footer {
+    padding: 12px 20px;
+    background: var(--bg-secondary);
+    border-top: 1px solid var(--border);
+    font-size: 12px;
+    color: var(--text-muted);
+    text-align: center;
+}
+
+.signals-cta {
+    text-align: center;
+    margin-top: 40px;
+}
+
+.no-signals {
+    grid-column: 1 / -1;
+    text-align: center;
+    color: var(--text-secondary);
+    padding: 40px;
+}
+
+/* ================================================
+   Trust Section
+   ================================================ */
+
+.trust {
+    padding: 60px 0;
+    background: var(--bg-secondary);
+    border-top: 1px solid var(--border);
+    border-bottom: 1px solid var(--border);
+}
+
+.trust-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+    gap: 32px;
+}
+
+.trust-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 16px;
+}
+
+.trust-icon {
+    font-size: 32px;
+    flex-shrink: 0;
+}
+
+.trust-content h4 {
+    font-size: 16px;
+    margin-bottom: 4px;
+}
+
+.trust-content p {
+    font-size: 14px;
+    color: var(--text-secondary);
+    line-height: 1.5;
+}
+
+/* ================================================
+   How It Works Section
+   ================================================ */
+
+.how-it-works {
+    padding: var(--section-padding) 0;
+    background: var(--bg-secondary);
+}
+
+.steps-grid {
+    display: flex;
+    align-items: flex-start;
+    justify-content: center;
+    gap: 20px;
+    flex-wrap: wrap;
+}
+
+.step {
+    flex: 1;
+    min-width: 200px;
+    max-width: 250px;
+    text-align: center;
+    padding: 24px;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+}
+
+.step-number {
+    width: 48px;
+    height: 48px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin: 0 auto 16px;
+    background: var(--accent-gradient);
+    border-radius: 50%;
+    font-size: 20px;
+    font-weight: 700;
+}
+
+.step h3 {
+    font-size: 16px;
+    margin-bottom: 8px;
+}
+
+.step p {
+    font-size: 13px;
+    color: var(--text-secondary);
+    line-height: 1.5;
+}
+
+.step-arrow {
+    font-size: 24px;
+    color: var(--accent-primary);
+    align-self: center;
+    padding-top: 20px;
+}
+
+@media (max-width: 900px) {
+    .step-arrow {
+        display: none;
+    }
+}
+
+/* ================================================
+   Signal Preview (Legacy)
+   ================================================ */
+
+.signal-preview {
+    padding: 40px 0 var(--section-padding);
+}
+
+.signal-card {
+    max-width: 400px;
+    margin: 0 auto;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    overflow: hidden;
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+}
+
+.signal-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 16px 20px;
+    background: var(--bg-secondary);
+    border-bottom: 1px solid var(--border);
 }
 
 .signal-confidence {

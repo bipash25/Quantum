@@ -254,7 +254,7 @@ def compute_features_v2(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def compute_atr_target(df: pd.DataFrame, atr_mult: float = 1.5) -> Tuple[pd.Series, pd.Series]:
+def compute_atr_target(df: pd.DataFrame, atr_mult: float = 1.5, timeframe: str = "4h") -> Tuple[pd.Series, pd.Series]:
     """
     Compute ATR-based targets instead of fixed percentage.
 
@@ -268,7 +268,9 @@ def compute_atr_target(df: pd.DataFrame, atr_mult: float = 1.5) -> Tuple[pd.Seri
     n = len(df)
 
     # Look-ahead window (max bars to check)
-    max_bars = 20  # For 4H, this is ~80 hours / 3.3 days
+    # For 4H: 20 bars = ~80 hours / 3.3 days
+    # For 1D: 10 bars = 10 days
+    max_bars = 10 if timeframe == "1d" else 20
 
     long_target = np.zeros(n)
     short_target = np.zeros(n)
@@ -385,7 +387,9 @@ def train_model_v2(symbol: str, timeframe: str, atr_mult: float = 1.5) -> Dict[s
         raise ValueError(f"Not enough data: {len(df_raw)} candles")
 
     df = resample_data(df_raw, timeframe)
-    min_bars = 300 if timeframe == "1d" else 500
+    # For daily (1d), we need at least 100 bars (100 days)
+    # For 4h, we need at least 500 bars (83 days)
+    min_bars = 100 if timeframe == "1d" else 500
     if len(df) < min_bars:
         raise ValueError(f"Not enough resampled data: {len(df)} bars (need {min_bars})")
 
@@ -395,7 +399,7 @@ def train_model_v2(symbol: str, timeframe: str, atr_mult: float = 1.5) -> Dict[s
 
     # Compute ATR-based targets
     logger.info("Computing ATR-based targets...")
-    y_long, y_short = compute_atr_target(df, atr_mult=atr_mult)
+    y_long, y_short = compute_atr_target(df, atr_mult=atr_mult, timeframe=timeframe)
 
     # Get feature columns
     feature_cols = get_feature_columns(df)
@@ -415,10 +419,12 @@ def train_model_v2(symbol: str, timeframe: str, atr_mult: float = 1.5) -> Dict[s
     # Replace infinities
     X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
 
-    # Remove last 20 bars (no target defined)
-    X = X[:-20]
-    y_long = y_long[:-20]
-    y_short = y_short[:-20]
+    # Remove last N bars (no target defined due to max_bars lookahead)
+    # For 1d: 10 bars, for 4h: 20 bars
+    lookahead_bars = 10 if timeframe == "1d" else 20
+    X = X[:-lookahead_bars]
+    y_long = y_long[:-lookahead_bars]
+    y_short = y_short[:-lookahead_bars]
 
     logger.info(f"Training data: {X.shape[0]} samples, {X.shape[1]} features")
     logger.info(f"LONG wins: {y_long.sum()} ({y_long.mean()*100:.1f}%)")

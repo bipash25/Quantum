@@ -95,7 +95,7 @@ class TelegramBot:
         return False
 
     def format_signal(self, signal: Dict) -> str:
-        """Format signal as Telegram message"""
+        """Format signal as Telegram message with clear timeframe label"""
         direction = signal.get("direction", "UNKNOWN")
         symbol = signal.get("symbol", "???")
         emoji = "🟢" if direction == "LONG" else "🔴"
@@ -110,6 +110,14 @@ class TelegramBot:
         timeframe = signal.get("timeframe", "4h")
         reasoning = signal.get("reasoning", "Technical analysis")
         valid_until = signal.get("valid_until", "")
+
+        # Determine timeframe label and trade type
+        if timeframe.lower() in ["1d", "24h"]:
+            tf_label = "[24H SIGNAL]"
+            trade_type = "Position Trade"
+        else:
+            tf_label = "[4H SIGNAL]"
+            trade_type = "Swing Trade"
 
         # Calculate percentages
         if direction == "LONG":
@@ -142,9 +150,9 @@ class TelegramBot:
             conf_indicator = "📊"
 
         message = f"""
-{emoji} *{direction} Signal* | {symbol} {conf_indicator}
+{tf_label} {emoji} *{direction}* | {symbol} {conf_indicator}
 
-📊 *Timeframe:* {timeframe.upper()}
+📊 *Timeframe:* {timeframe.upper()} ({trade_type})
 💰 *Entry:* `${entry:.4f}`
 🎯 *Take Profits:*
    TP1: `${tp1:.4f}` (+{tp1_pct:.1f}%)
@@ -195,8 +203,12 @@ _📈 @QuantumTradingAIX_
 🚀 *Quantum Trading AI* is now online!
 
 📊 Monitoring 16 crypto pairs for trading opportunities
-⏱ Timeframe: 4H
+⏱ Timeframes: 4H (swing trades) + 24H (position trades)
 🎯 Strategy: ML-powered technical analysis
+
+*Signal Types:*
+• [4H SIGNAL] - Swing trades, valid for 4 hours
+• [24H SIGNAL] - Position trades, valid for 24 hours
 
 Stay tuned for signals! 📈
 
