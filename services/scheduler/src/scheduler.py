@@ -602,22 +602,20 @@ class SignalScheduler:
         logger.info(f"Generated {len(signals)} {signal_type} signals")
 
         if signals:
-            # Send each signal to Telegram and save to database
+            # Save each signal to database and publish to Redis
+            # (Telegram bot will handle sending via Redis subscription)
             for signal in signals:
                 # Save to database for outcome tracking
                 self.save_signal_to_db(signal)
 
-                message = format_signal(signal)
-                await self.send_telegram_message(message)
-                await asyncio.sleep(1)  # Rate limiting
-
-                # Also publish to Redis for other services
+                # Publish to Redis - bot will send to Telegram
                 self.redis_client.publish(
                     "quantum:signals",
                     json.dumps(signal)
                 )
+                await asyncio.sleep(0.5)  # Rate limiting between publishes
         else:
-            # Send status update if no signals
+            # Send status update if no signals (scheduler sends this directly)
             status = f"""
 📊 *Quantum Trading AI - {signal_type} Update*
 
