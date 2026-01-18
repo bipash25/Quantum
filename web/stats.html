@@ -353,6 +353,11 @@
                     <div class="sub">Per closed position</div>
                 </div>
                 <div class="stat-card">
+                    <div class="label">1H Signals</div>
+                    <div class="value" id="stat-1h">--</div>
+                    <div class="sub">Day trades</div>
+                </div>
+                <div class="stat-card">
                     <div class="label">4H Signals</div>
                     <div class="value" id="stat-4h">--</div>
                     <div class="sub">Swing trades</div>
@@ -618,6 +623,7 @@
                 document.getElementById('stat-avg-pnl').textContent = (avgPnl >= 0 ? '+' : '') + avgPnl.toFixed(2) + '%';
                 document.getElementById('stat-avg-pnl').className = 'value ' + (avgPnl >= 0 ? 'success' : 'danger');
 
+                document.getElementById('stat-1h').textContent = data.total_1h_signals || 0;
                 document.getElementById('stat-4h').textContent = data.total_4h_signals;
                 document.getElementById('stat-24h').textContent = data.total_24h_signals;
 

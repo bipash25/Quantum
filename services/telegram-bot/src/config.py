@@ -25,7 +25,7 @@ AVAILABLE_SYMBOLS = [
 ]
 
 # Available timeframes
-AVAILABLE_TIMEFRAMES = ["4h", "1d"]
+AVAILABLE_TIMEFRAMES = ["1h", "4h", "1d"]
 
 
 class Settings(BaseSettings):

@@ -332,13 +332,14 @@ _📈 @QuantumTradingAIX_
 🎯 Strategy: ML-powered technical analysis
 
 *Signal Types:*
+• [1H SIGNAL] - Day trades, valid for 1 hour
 • [4H SIGNAL] - Swing trades, valid for 4 hours
 • [24H SIGNAL] - Position trades, valid for 24 hours
 
 *DM Commands:*
 /preferences - View your settings
 /symbols BTC,ETH,SOL - Filter by symbols
-/timeframes 4H,24H - Filter by timeframe
+/timeframes 1H,4H,24H - Filter by timeframe
 
 Stay tuned for signals! 📈
 
@@ -432,7 +433,7 @@ I provide AI-powered crypto trading signals using machine learning analysis.
 *Customize your signals:*
 /preferences - View your current settings
 /symbols BTC,ETH,SOL - Only get signals for these coins
-/timeframes 4H,24H - Choose which timeframes to receive
+/timeframes 1H,4H,24H - Choose which timeframes to receive
 
 ⚠️ *IMPORTANT RISK WARNING:*
 Trading signals are for *educational purposes only*. This is *not financial advice*. You can lose money trading cryptocurrencies. Past performance does not guarantee future results.
@@ -451,7 +452,7 @@ Type /help for all commands.
 *Preference Commands:*
 /preferences - Show your current settings
 /symbols BTC,ETH,SOL - Set symbol filter (empty = all)
-/timeframes 4H,24H - Set timeframe filter
+/timeframes 1H,4H,24H - Set timeframe filter
 
 *Info Commands:*
 /start - Welcome message and disclaimer
@@ -465,7 +466,7 @@ IMX, LDO, STX, FIL, HBAR, VET, ICP, MKR, QNT, GRT,
 FLOW, XLM, AXS, THETA, EGLD, APE, CHZ, EOS, CFX, ZIL
 
 *Available Timeframes:*
-4H (swing trades), 24H (position trades)
+1H (day trades), 4H (swing trades), 24H (position trades)
 
 📢 *Channel:* @QuantumTradingAIX
 🤖 *Bot:* @QuantumAIXRobot
@@ -515,7 +516,7 @@ FLOW, XLM, AXS, THETA, EGLD, APE, CHZ, EOS, CFX, ZIL
 *Update your preferences:*
 • `/symbols BTC,ETH,SOL` - Set symbols
 • `/symbols clear` - Clear filter (receive all)
-• `/timeframes 4H,24H` - Set timeframes
+• `/timeframes 1H,4H,24H` - Set timeframes
 
 _Signals matching your filters will be sent to you directly._
 """
@@ -611,8 +612,10 @@ Use /help to see full list
         if len(parts) < 2:
             # Show current timeframes and usage
             user = self.get_or_create_user(user_id)
-            timeframes = user.get("preferred_timeframes", ["4h", "1d"])
+            timeframes = user.get("preferred_timeframes", ["1h", "4h", "1d"])
             tf_display = []
+            if "1h" in timeframes:
+                tf_display.append("1H")
             if "4h" in timeframes:
                 tf_display.append("4H")
             if "1d" in timeframes:
@@ -625,12 +628,14 @@ Use /help to see full list
 *Current:* {current}
 
 *Usage:*
-`/timeframes 4H` - Only 4-hour signals
-`/timeframes 24H` - Only 24-hour signals
-`/timeframes 4H,24H` - Both timeframes
+`/timeframes 1H` - Only 1-hour signals (day trades)
+`/timeframes 4H` - Only 4-hour signals (swing trades)
+`/timeframes 24H` - Only 24-hour signals (position trades)
+`/timeframes 1H,4H,24H` - All timeframes
 `/timeframes all` - All timeframes
 
 *Available:*
+• 1H - Day trades (every hour)
 • 4H - Swing trades (every 4 hours)
 • 24H - Position trades (daily)
 """
@@ -641,8 +646,8 @@ Use /help to see full list
 
         # Handle all command
         if args in ["ALL", "BOTH", "CLEAR"]:
-            if self.update_user_timeframes(user_id, ["4h", "1d"]):
-                await self.send_message(chat_id, "✅ Timeframe filter set to *all timeframes* (4H + 24H).")
+            if self.update_user_timeframes(user_id, ["1h", "4h", "1d"]):
+                await self.send_message(chat_id, "✅ Timeframe filter set to *all timeframes* (1H + 4H + 24H).")
             else:
                 await self.send_message(chat_id, "❌ Failed to update preferences. Please try again.")
             return
@@ -654,7 +659,10 @@ Use /help to see full list
         valid_timeframes = []
         for tf in tf_input:
             tf_lower = tf.lower()
-            if tf_lower in ["4h", "4"]:
+            if tf_lower in ["1h", "1"]:
+                if "1h" not in valid_timeframes:
+                    valid_timeframes.append("1h")
+            elif tf_lower in ["4h", "4"]:
                 if "4h" not in valid_timeframes:
                     valid_timeframes.append("4h")
             elif tf_lower in ["24h", "1d", "24", "d", "daily"]:
@@ -664,13 +672,15 @@ Use /help to see full list
         if not valid_timeframes:
             await self.send_message(
                 chat_id,
-                "❌ No valid timeframes provided.\n\n*Available:* 4H, 24H"
+                "❌ No valid timeframes provided.\n\n*Available:* 1H, 4H, 24H"
             )
             return
 
         # Update preferences
         if self.update_user_timeframes(user_id, valid_timeframes):
             tf_display = []
+            if "1h" in valid_timeframes:
+                tf_display.append("1H (day trades)")
             if "4h" in valid_timeframes:
                 tf_display.append("4H (swing trades)")
             if "1d" in valid_timeframes:

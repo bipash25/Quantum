@@ -257,6 +257,7 @@ class DashboardStats(BaseModel):
     avg_confidence: float
     best_symbol: Optional[str]
     worst_symbol: Optional[str]
+    total_1h_signals: int = 0
     total_4h_signals: int
     total_24h_signals: int
     # P&L metrics
@@ -370,6 +371,7 @@ async def get_dashboard_stats():
             """))
             tf_counts = {row[0]: row[1] for row in tf_query.fetchall()}
 
+            total_1h = tf_counts.get('1h', 0)
             total_4h = tf_counts.get('4h', 0)
             total_24h = tf_counts.get('1d', 0)
 
@@ -385,6 +387,7 @@ async def get_dashboard_stats():
             avg_confidence=round(avg_conf, 1),
             best_symbol=best_symbol,
             worst_symbol=worst_symbol,
+            total_1h_signals=total_1h,
             total_4h_signals=total_4h,
             total_24h_signals=total_24h,
             cumulative_pnl=round(cumulative_pnl, 2),
@@ -400,7 +403,7 @@ async def get_dashboard_stats():
             total_signals=0, wins=0, losses=0, expired=0, active=0, partial=0,
             win_rate=None, avg_rr_ratio=0, avg_confidence=0,
             best_symbol=None, worst_symbol=None,
-            total_4h_signals=0, total_24h_signals=0,
+            total_1h_signals=0, total_4h_signals=0, total_24h_signals=0,
             cumulative_pnl=0, avg_pnl_per_trade=0,
             tp1_hits=0, tp2_hits=0, tp3_hits=0,
             last_updated=datetime.now(timezone.utc),

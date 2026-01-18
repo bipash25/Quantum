@@ -107,6 +107,30 @@ async def fetch_klines(
         return []
 
 
+async def get_latest_candle_time(
+    pool: asyncpg.Pool,
+    symbol: str,
+    timeframe: str
+) -> int:
+    """Get the timestamp of the latest candle in the DB (in milliseconds)"""
+    async with pool.acquire() as conn:
+        # Check if table exists first (just in case)
+        # Assuming table exists based on previous runs
+        latest = await conn.fetchval(
+            """
+            SELECT time FROM candles
+            WHERE symbol = $1 AND timeframe = $2
+            ORDER BY time DESC LIMIT 1
+            """,
+            symbol, timeframe
+        )
+
+    if latest:
+        # Convert datetime to ms timestamp
+        return int(latest.timestamp() * 1000)
+    return 0
+
+
 async def backfill_symbol(
     session: aiohttp.ClientSession,
     pool: asyncpg.Pool,
@@ -116,17 +140,36 @@ async def backfill_symbol(
     interval: str = "1m",
 ) -> int:
     """Backfill historical data for a single symbol"""
-    logger.info(f"Backfilling {symbol} from {start_date.date()} to {end_date.date()}...")
-
-    total_candles = 0
+    # Check existing data to support resume
     current_start = int(start_date.timestamp() * 1000)
     end_ms = int(end_date.timestamp() * 1000)
 
-    # Calculate expected candles for progress tracking
     interval_minutes = {"1m": 1, "5m": 5, "15m": 15, "1h": 60, "4h": 240, "1d": 1440}
     minutes_per_candle = interval_minutes.get(interval, 1)
-    total_minutes = (end_date - start_date).total_seconds() / 60
-    expected_candles = int(total_minutes / minutes_per_candle)
+    ms_per_candle = minutes_per_candle * 60 * 1000
+
+    latest_ms = await get_latest_candle_time(pool, symbol, interval)
+
+    if latest_ms > current_start:
+        # If we have data up to X, start from X + 1 candle
+        # But ensure we don't start beyond end_date (which would mean we are done)
+        new_start = latest_ms + ms_per_candle
+
+        if new_start >= end_ms:
+            logger.info(f"Skipping {symbol}: Data already up to date ({datetime.fromtimestamp(latest_ms/1000).date()})")
+            return 0
+
+        logger.info(f"Resuming {symbol} from {datetime.fromtimestamp(new_start/1000).date()}...")
+        current_start = new_start
+    else:
+        logger.info(f"Backfilling {symbol} from {start_date.date()} to {end_date.date()}...")
+
+    total_candles = 0
+    # Calculate expected candles for progress tracking (remaining)
+    remaining_minutes = (end_ms - current_start) / 1000 / 60
+    expected_candles = int(remaining_minutes / minutes_per_candle)
+    if expected_candles <= 0:
+        return 0
 
     while current_start < end_ms:
         klines = await fetch_klines(
@@ -229,22 +272,29 @@ async def main(args):
 
     # Create HTTP session
     async with aiohttp.ClientSession() as session:
-        total_candles = 0
+        # Create a semaphore to limit concurrency (e.g., 5 symbols at once to stay safe with rate limits)
+        # Binance limit is 1200 weight/min. Klines are weight 1.
+        # 5 concurrent tasks * ~3-4 req/s = ~900-1200 req/min.
+        semaphore = asyncio.Semaphore(5)
 
-        for i, symbol in enumerate(symbols, 1):
-            logger.info(f"[{i}/{len(symbols)}] Processing {symbol}...")
+        async def protected_backfill(symbol):
+            async with semaphore:
+                try:
+                    return await backfill_symbol(
+                        session, pool, symbol, start_date, end_date, args.interval
+                    )
+                except Exception as e:
+                    logger.error(f"Error processing {symbol}: {e}")
+                    return 0
 
-            try:
-                count = await backfill_symbol(
-                    session, pool, symbol, start_date, end_date, args.interval
-                )
-                total_candles += count
-            except Exception as e:
-                logger.error(f"Error processing {symbol}: {e}")
-                continue
+        logger.info(f"Starting backfill for {len(symbols)} symbols with 5x concurrency...")
 
-            # Small delay between symbols
-            await asyncio.sleep(0.5)
+        # Create tasks
+        tasks = [protected_backfill(symbol) for symbol in symbols]
+
+        # Run all tasks
+        results = await asyncio.gather(*tasks)
+        total_candles = sum(results)
 
     await pool.close()
 
@@ -261,7 +311,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--days",
         type=int,
-        default=3650,
+        default=180,
         help="Number of days to backfill (default: 180)"
     )
     parser.add_argument(
