@@ -72,6 +72,27 @@ class OutcomeTracker:
         """)
         return pd.read_sql(query, self.engine)
 
+    def get_untracked_expired_signals(self, limit: int = 50) -> pd.DataFrame:
+        """Get expired signals that were never tracked (backlog)."""
+        query = text("""
+            SELECT
+                s.id, s.created_at, s.symbol, s.direction, s.timeframe,
+                s.entry_price, s.stop_loss, s.take_profit_1,
+                s.take_profit_2, s.take_profit_3, s.valid_until,
+                s.risk_reward_ratio, s.status,
+                NULL as outcome_id, false as tp1_hit, false as tp2_hit, false as tp3_hit,
+                NULL as tp1_time, NULL as tp2_time, NULL as tp3_time
+            FROM signals s
+            LEFT JOIN signal_outcomes o
+                ON s.id = o.signal_id AND s.created_at = o.signal_created_at
+            WHERE o.id IS NULL
+              AND s.valid_until <= NOW()
+              AND s.created_at > NOW() - INTERVAL '7 days'
+            ORDER BY s.created_at ASC
+            LIMIT :limit
+        """)
+        return pd.read_sql(query, self.engine, params={"limit": limit})
+
     def get_price_data_since(
         self, symbol: str, start_time: datetime
     ) -> pd.DataFrame:
@@ -365,18 +386,25 @@ class OutcomeTracker:
                     :tp1_hit, :tp1_time, :tp2_hit, :tp2_time, :tp3_hit, :tp3_time
                 )
             """)
+            # Convert numpy types to Python native types
+            exit_price = outcome.get("exit_price")
+            pnl_percent = outcome.get("pnl_percent")
+            actual_pnl = outcome.get("actual_pnl_percent")
+            mfe = outcome["max_favorable_excursion"]
+            mae = outcome["max_adverse_excursion"]
+
             with self.engine.begin() as conn:
                 conn.execute(insert, {
-                    "signal_id": signal_id,
+                    "signal_id": int(signal_id),
                     "signal_created_at": signal_created_at,
                     "outcome": outcome["outcome"],
-                    "exit_price": outcome.get("exit_price"),
+                    "exit_price": float(exit_price) if exit_price is not None else None,
                     "exit_time": outcome.get("exit_time"),
-                    "pnl_percent": outcome.get("pnl_percent"),
-                    "actual_pnl": outcome.get("actual_pnl_percent"),
-                    "mfe": outcome["max_favorable_excursion"],
-                    "mae": outcome["max_adverse_excursion"],
-                    "duration": duration_minutes,
+                    "pnl_percent": float(pnl_percent) if pnl_percent is not None else None,
+                    "actual_pnl": float(actual_pnl) if actual_pnl is not None else None,
+                    "mfe": float(mfe) if mfe is not None else None,
+                    "mae": float(mae) if mae is not None else None,
+                    "duration": int(duration_minutes),
                     "risk_pct": RISK_PER_TRADE_PCT,
                     "tp1_hit": outcome["tp1_hit"],
                     "tp1_time": outcome.get("tp1_time"),
@@ -432,13 +460,13 @@ class OutcomeTracker:
         try:
             with self.engine.begin() as conn:
                 conn.execute(insert, {
-                    "signal_id": signal_id,
+                    "signal_id": int(signal_id),
                     "created_at": signal_created_at,
-                    "action": action,
-                    "price": price,
-                    "quantity_pct": quantity_pct,
-                    "pnl_percent": pnl_percent,
-                    "cumulative_pnl": cumulative_pnl,
+                    "action": str(action),
+                    "price": float(price),
+                    "quantity_pct": float(quantity_pct),
+                    "pnl_percent": float(pnl_percent) if pnl_percent is not None else 0.0,
+                    "cumulative_pnl": float(cumulative_pnl) if cumulative_pnl is not None else 0.0,
                     "timestamp": timestamp,
                 })
             logger.debug(f"Recorded {action} execution for signal {signal_id}")
@@ -729,6 +757,16 @@ _🤖 @QuantumTradingAIX_"""
         signals = self.get_active_signals()
         logger.info(f"Checking {len(signals)} active signals for outcomes")
 
+        await self._process_signals(signals)
+
+        # Also process expired signals that were never tracked (backlog)
+        expired_signals = self.get_untracked_expired_signals(limit=50)
+        if len(expired_signals) > 0:
+            logger.info(f"Processing {len(expired_signals)} expired backlog signals")
+            await self._process_signals(expired_signals)
+
+    async def _process_signals(self, signals: pd.DataFrame):
+        """Process a batch of signals for outcomes."""
         for _, signal in signals.iterrows():
             try:
                 candles = self.get_price_data_since(
