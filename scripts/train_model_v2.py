@@ -7,12 +7,15 @@ Improved model with:
 - ATR-based targets
 - Better feature engineering
 - Enhanced ensemble with CatBoost
+- Model versioning for comparison
 
 Usage:
     python scripts/train_model_v2.py --symbol BTCUSDT --timeframe 4h
     python scripts/train_model_v2.py --all --timeframe 4h
+    python scripts/train_model_v2.py --all --timeframe 3d --version v3
 """
 import argparse
+import json
 import logging
 import os
 from datetime import datetime, timedelta, timezone
@@ -386,7 +389,106 @@ def get_feature_columns(df: pd.DataFrame) -> List[str]:
     return [c for c in numeric_cols if c not in exclude]
 
 
-def train_model_v2(symbol: str, timeframe: str, atr_mult: float = 1.5) -> Dict[str, Any]:
+def save_model_version(
+    engine,
+    version_name: str,
+    symbol: str,
+    timeframe: str,
+    metrics: Dict[str, Any],
+    model_path: str,
+    atr_mult: float,
+    feature_cols: List[str],
+    feature_importances: np.ndarray,
+    total_samples: int,
+) -> bool:
+    """
+    Save model version to database and auto-promote if better.
+
+    Returns True if model was promoted to active, False otherwise.
+    """
+    # Get top 10 features by importance
+    importance_ranking = sorted(
+        zip(feature_cols, feature_importances),
+        key=lambda x: x[1],
+        reverse=True
+    )[:10]
+    top_features = {name: float(imp) for name, imp in importance_ranking}
+
+    with engine.begin() as conn:
+        # Get current active model's precision
+        current = conn.execute(text("""
+            SELECT combined_precision FROM model_versions
+            WHERE symbol = :symbol AND timeframe = :timeframe AND is_active = true
+        """), {"symbol": symbol, "timeframe": timeframe}).fetchone()
+
+        current_precision = current[0] if current else 0
+        new_precision = metrics['combined_precision']
+
+        # Promote if >5% improvement or no current active model
+        should_promote = (new_precision > current_precision * 1.05) or (current_precision == 0)
+
+        if should_promote:
+            # Deactivate old model
+            conn.execute(text("""
+                UPDATE model_versions SET is_active = false
+                WHERE symbol = :symbol AND timeframe = :timeframe AND is_active = true
+            """), {"symbol": symbol, "timeframe": timeframe})
+            logger.info(f"Promoting new model (precision {new_precision:.3f} > {current_precision:.3f})")
+        else:
+            logger.info(f"Not promoting (precision {new_precision:.3f} not >5% better than {current_precision:.3f})")
+
+        # Insert new version - convert numpy types to Python native
+        conn.execute(text("""
+            INSERT INTO model_versions (
+                version_name, symbol, timeframe,
+                long_precision, short_precision, combined_precision,
+                long_auc, short_auc, long_threshold, short_threshold,
+                atr_multiplier, num_features, top_features,
+                model_path, total_samples, is_active
+            ) VALUES (
+                :version, :symbol, :timeframe,
+                :long_prec, :short_prec, :combined_prec,
+                :long_auc, :short_auc, :long_thresh, :short_thresh,
+                :atr_mult, :n_features, CAST(:top_features AS jsonb),
+                :model_path, :total_samples, :is_active
+            )
+            ON CONFLICT (version_name, symbol, timeframe) DO UPDATE SET
+                long_precision = EXCLUDED.long_precision,
+                short_precision = EXCLUDED.short_precision,
+                combined_precision = EXCLUDED.combined_precision,
+                long_auc = EXCLUDED.long_auc,
+                short_auc = EXCLUDED.short_auc,
+                long_threshold = EXCLUDED.long_threshold,
+                short_threshold = EXCLUDED.short_threshold,
+                atr_multiplier = EXCLUDED.atr_multiplier,
+                num_features = EXCLUDED.num_features,
+                top_features = EXCLUDED.top_features,
+                model_path = EXCLUDED.model_path,
+                total_samples = EXCLUDED.total_samples,
+                is_active = EXCLUDED.is_active
+        """), {
+            "version": version_name,
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "long_prec": float(metrics['long_precision']),
+            "short_prec": float(metrics['short_precision']),
+            "combined_prec": float(metrics['combined_precision']),
+            "long_auc": float(metrics['long_auc']),
+            "short_auc": float(metrics['short_auc']),
+            "long_thresh": float(metrics.get('long_threshold', 0.5)),
+            "short_thresh": float(metrics.get('short_threshold', 0.5)),
+            "atr_mult": float(atr_mult),
+            "n_features": int(len(feature_cols)),
+            "top_features": json.dumps(top_features),
+            "model_path": model_path,
+            "total_samples": int(total_samples),
+            "is_active": bool(should_promote),
+        })
+
+    return should_promote
+
+
+def train_model_v2(symbol: str, timeframe: str, atr_mult: float = 1.5, version: str = "v2") -> Dict[str, Any]:
     """Train enhanced model with ATR-based targets"""
     logger.info("=" * 60)
     logger.info(f"Training {symbol} {timeframe} (ATR mult: {atr_mult})")
@@ -566,8 +668,8 @@ def train_model_v2(symbol: str, timeframe: str, atr_mult: float = 1.5) -> Dict[s
     short_model_final.fit(X, y_short, sample_weight=compute_sample_weight("balanced", y_short))
 
     # Save models
-    version = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    model_name = f"v2_{symbol}_{timeframe}_{version}"
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    model_name = f"{version}_{symbol}_{timeframe}_{timestamp}"
     model_path = os.path.join(MODEL_DIR, model_name)
     os.makedirs(model_path, exist_ok=True)
 
@@ -582,7 +684,8 @@ def train_model_v2(symbol: str, timeframe: str, atr_mult: float = 1.5) -> Dict[s
         "long_auc": float(long_auc),
         "short_auc": float(short_auc),
         "n_features": len(feature_cols),
-        "train_date": version,
+        "train_date": timestamp,
+        "version": version,
     }
 
     joblib.dump(long_model_final, os.path.join(model_path, "long.joblib"))
@@ -591,6 +694,45 @@ def train_model_v2(symbol: str, timeframe: str, atr_mult: float = 1.5) -> Dict[s
     joblib.dump(config, os.path.join(model_path, "config.joblib"))
 
     logger.info(f"Models saved to {model_path}")
+
+    # Save to model_versions database table
+    try:
+        engine = create_engine(DB_URL)
+        # Get combined feature importances (average of long and short)
+        long_importance = long_model_final.feature_importances_
+        short_importance = short_model_final.feature_importances_
+        combined_importance = (long_importance + short_importance) / 2
+
+        metrics = {
+            "long_precision": long_precision,
+            "short_precision": short_precision,
+            "combined_precision": combined_precision,
+            "long_auc": long_auc,
+            "short_auc": short_auc,
+            "long_threshold": best_long_thresh,
+            "short_threshold": best_short_thresh,
+        }
+
+        promoted = save_model_version(
+            engine=engine,
+            version_name=version,
+            symbol=symbol,
+            timeframe=timeframe,
+            metrics=metrics,
+            model_path=model_path,
+            atr_mult=atr_mult,
+            feature_cols=feature_cols,
+            feature_importances=combined_importance,
+            total_samples=len(X),
+        )
+
+        if promoted:
+            logger.info(f"Model {version} promoted to active for {symbol}/{timeframe}")
+        else:
+            logger.info(f"Model {version} saved but not promoted (existing model is better)")
+
+    except Exception as e:
+        logger.warning(f"Failed to save model version to database: {e}")
 
     return {
         "model_name": model_name,
@@ -610,6 +752,7 @@ def main():
     parser.add_argument("--all", action="store_true", help="Train all symbols")
     parser.add_argument("--timeframe", type=str, default="4h", choices=["1h", "4h", "1d", "3d"])
     parser.add_argument("--atr-mult", type=float, default=None, help="ATR multiplier for targets (auto-set if not specified)")
+    parser.add_argument("--version", type=str, default="v2", help="Model version name (e.g., v2, v3)")
 
     args = parser.parse_args()
 
@@ -625,7 +768,7 @@ def main():
         results = {}
         for symbol in MVP_SYMBOLS:
             try:
-                result = train_model_v2(symbol, args.timeframe, atr_mult)
+                result = train_model_v2(symbol, args.timeframe, atr_mult, args.version)
                 results[symbol] = result
             except Exception as e:
                 logger.error(f"Failed {symbol}: {e}")
@@ -649,7 +792,7 @@ def main():
             logger.info(f"Average AUC: {avg_auc:.3f}")
 
     elif args.symbol:
-        train_model_v2(args.symbol, args.timeframe, atr_mult)
+        train_model_v2(args.symbol, args.timeframe, atr_mult, args.version)
     else:
         parser.print_help()
 
