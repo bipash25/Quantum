@@ -276,6 +276,37 @@ services:
     networks:
       - quantum_network
 
+  # =============================================================================
+  # ALERTING: System health monitoring and notifications
+  # =============================================================================
+  alerting:
+    build:
+      context: ./services/alerting
+      dockerfile: Dockerfile
+    container_name: quantum_alerting
+    restart: unless-stopped
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      - DB_HOST=timescaledb
+      - DB_PORT=5432
+      - DB_USER=${DB_USER}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - DB_NAME=${DB_NAME}
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - TELEGRAM_ADMIN_CHAT_ID=${TELEGRAM_ADMIN_CHAT_ID}
+      - PROMETHEUS_URL=http://prometheus:9090
+      - ALERT_CHECK_INTERVAL=60
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./data/logs:/app/logs
+    networks:
+      - quantum_network
+
 # =============================================================================
 # NETWORKS
 # =============================================================================
