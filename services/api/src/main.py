@@ -260,6 +260,7 @@ class DashboardStats(BaseModel):
     total_1h_signals: int = 0
     total_4h_signals: int
     total_24h_signals: int
+    total_3d_signals: int = 0
     # P&L metrics
     cumulative_pnl: float = 0.0  # Total P&L with 2% risk per trade
     avg_pnl_per_trade: float = 0.0
@@ -374,6 +375,7 @@ async def get_dashboard_stats():
             total_1h = tf_counts.get('1h', 0)
             total_4h = tf_counts.get('4h', 0)
             total_24h = tf_counts.get('1d', 0)
+            total_3d = tf_counts.get('3d', 0)
 
         return DashboardStats(
             total_signals=total,
@@ -390,6 +392,7 @@ async def get_dashboard_stats():
             total_1h_signals=total_1h,
             total_4h_signals=total_4h,
             total_24h_signals=total_24h,
+            total_3d_signals=total_3d,
             cumulative_pnl=round(cumulative_pnl, 2),
             avg_pnl_per_trade=round(avg_pnl, 2),
             tp1_hits=tp1_hits,
@@ -403,7 +406,7 @@ async def get_dashboard_stats():
             total_signals=0, wins=0, losses=0, expired=0, active=0, partial=0,
             win_rate=None, avg_rr_ratio=0, avg_confidence=0,
             best_symbol=None, worst_symbol=None,
-            total_1h_signals=0, total_4h_signals=0, total_24h_signals=0,
+            total_1h_signals=0, total_4h_signals=0, total_24h_signals=0, total_3d_signals=0,
             cumulative_pnl=0, avg_pnl_per_trade=0,
             tp1_hits=0, tp2_hits=0, tp3_hits=0,
             last_updated=datetime.now(timezone.utc),

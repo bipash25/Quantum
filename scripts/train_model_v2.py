@@ -262,15 +262,26 @@ def compute_atr_target(df: pd.DataFrame, atr_mult: float = 1.5, timeframe: str =
     SHORT = price falls by atr_mult * ATR before rising by atr_mult * ATR
 
     This is more realistic as it accounts for volatility.
+
+    Timeframe-specific look-ahead windows:
+    - 1H: 10 bars = 10 hours
+    - 4H: 20 bars = 80 hours / 3.3 days
+    - 1D: 10 bars = 10 days
+    - 3D: 10 bars = 30 days (wider targets for position trades)
     """
     close = df["close"].values
     atr = df["atr_14"].values
     n = len(df)
 
-    # Look-ahead window (max bars to check)
-    # For 4H: 20 bars = ~80 hours / 3.3 days
-    # For 1D: 10 bars = 10 days
-    max_bars = 10 if timeframe == "1d" else 20
+    # Look-ahead window based on timeframe
+    if timeframe == "3d":
+        max_bars = 10  # 30 days look-ahead for 3D candles
+    elif timeframe == "1d":
+        max_bars = 10  # 10 days look-ahead
+    elif timeframe == "1h":
+        max_bars = 10  # 10 hours look-ahead
+    else:  # 4h
+        max_bars = 20  # ~3.3 days look-ahead
 
     long_target = np.zeros(n)
     short_target = np.zeros(n)
@@ -350,7 +361,7 @@ def load_data(symbol: str, days: int = 180) -> pd.DataFrame:
 
 def resample_data(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
     """Resample to target timeframe"""
-    offset = {"1h": "1h", "4h": "4h", "1d": "1D"}.get(timeframe, "4h")
+    offset = {"1h": "1h", "4h": "4h", "1d": "1D", "3d": "3D"}.get(timeframe, "4h")
 
     resampled = df.resample(offset).agg({
         "open": "first", "high": "max", "low": "min",
@@ -387,9 +398,13 @@ def train_model_v2(symbol: str, timeframe: str, atr_mult: float = 1.5) -> Dict[s
         raise ValueError(f"Not enough data: {len(df_raw)} candles")
 
     df = resample_data(df_raw, timeframe)
-    # For daily (1d), we need at least 100 bars (100 days)
-    # For 4h, we need at least 500 bars (83 days)
-    min_bars = 100 if timeframe == "1d" else 500
+    # Minimum bars required for training:
+    # - 1H: 500 bars (21 days)
+    # - 4H: 500 bars (83 days)
+    # - 1D: 100 bars (100 days)
+    # - 3D: 60 bars (180 days)
+    min_bars_map = {"1h": 500, "4h": 500, "1d": 100, "3d": 60}
+    min_bars = min_bars_map.get(timeframe, 500)
     if len(df) < min_bars:
         raise ValueError(f"Not enough resampled data: {len(df)} bars (need {min_bars})")
 
@@ -420,8 +435,9 @@ def train_model_v2(symbol: str, timeframe: str, atr_mult: float = 1.5) -> Dict[s
     X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
 
     # Remove last N bars (no target defined due to max_bars lookahead)
-    # For 1d: 10 bars, for 4h: 20 bars
-    lookahead_bars = 10 if timeframe == "1d" else 20
+    # Match the lookahead window used in compute_atr_target
+    lookahead_map = {"3d": 10, "1d": 10, "1h": 10, "4h": 20}
+    lookahead_bars = lookahead_map.get(timeframe, 20)
     X = X[:-lookahead_bars]
     y_long = y_long[:-lookahead_bars]
     y_short = y_short[:-lookahead_bars]
@@ -592,16 +608,24 @@ def main():
     parser = argparse.ArgumentParser(description="Train enhanced ML models v2")
     parser.add_argument("--symbol", type=str, help="Symbol to train")
     parser.add_argument("--all", action="store_true", help="Train all symbols")
-    parser.add_argument("--timeframe", type=str, default="4h", choices=["1h", "4h", "1d"])
-    parser.add_argument("--atr-mult", type=float, default=1.5, help="ATR multiplier for targets")
+    parser.add_argument("--timeframe", type=str, default="4h", choices=["1h", "4h", "1d", "3d"])
+    parser.add_argument("--atr-mult", type=float, default=None, help="ATR multiplier for targets (auto-set if not specified)")
 
     args = parser.parse_args()
+
+    # Auto-set ATR multiplier based on timeframe if not specified
+    # 3D needs wider targets for position trades
+    if args.atr_mult is None:
+        atr_mult_defaults = {"1h": 1.5, "4h": 1.5, "1d": 2.0, "3d": 2.5}
+        atr_mult = atr_mult_defaults.get(args.timeframe, 1.5)
+    else:
+        atr_mult = args.atr_mult
 
     if args.all:
         results = {}
         for symbol in MVP_SYMBOLS:
             try:
-                result = train_model_v2(symbol, args.timeframe, args.atr_mult)
+                result = train_model_v2(symbol, args.timeframe, atr_mult)
                 results[symbol] = result
             except Exception as e:
                 logger.error(f"Failed {symbol}: {e}")
@@ -625,7 +649,7 @@ def main():
             logger.info(f"Average AUC: {avg_auc:.3f}")
 
     elif args.symbol:
-        train_model_v2(args.symbol, args.timeframe, args.atr_mult)
+        train_model_v2(args.symbol, args.timeframe, atr_mult)
     else:
         parser.print_help()
 

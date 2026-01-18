@@ -367,6 +367,11 @@
                     <div class="value" id="stat-24h">--</div>
                     <div class="sub">Position trades</div>
                 </div>
+                <div class="stat-card">
+                    <div class="label">3D Signals</div>
+                    <div class="value" id="stat-3d">--</div>
+                    <div class="sub">Position trades</div>
+                </div>
             </div>
 
             <!-- Performance Chart -->
@@ -626,6 +631,7 @@
                 document.getElementById('stat-1h').textContent = data.total_1h_signals || 0;
                 document.getElementById('stat-4h').textContent = data.total_4h_signals;
                 document.getElementById('stat-24h').textContent = data.total_24h_signals;
+                document.getElementById('stat-3d').textContent = data.total_3d_signals || 0;
 
                 document.getElementById('last-updated').textContent =
                     'Updated ' + timeAgo(data.last_updated);

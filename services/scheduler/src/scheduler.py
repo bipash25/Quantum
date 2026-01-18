@@ -342,7 +342,10 @@ def format_signal(signal: dict) -> str:
     valid_until = signal.get("valid_until", "")
 
     # Determine timeframe label and trade type
-    if timeframe.lower() in ["1d", "24h"]:
+    if timeframe.lower() == "3d":
+        tf_label = "[3D SIGNAL]"
+        trade_type = "Position Trade"
+    elif timeframe.lower() in ["1d", "24h"]:
         tf_label = "[24H SIGNAL]"
         trade_type = "Position Trade"
     elif timeframe.lower() == "1h":
@@ -402,7 +405,7 @@ _📈 @QuantumTradingAIX_
 
 
 class SignalScheduler:
-    """Scheduler for automated signal generation (1H, 4H, and 24H)"""
+    """Scheduler for automated signal generation (1H, 4H, 3D and 24H)"""
 
     def __init__(self):
         self.engine = create_engine(settings.database_url)
@@ -411,6 +414,7 @@ class SignalScheduler:
         self.session: Optional[aiohttp.ClientSession] = None
         self.models_1h: Dict[str, Dict] = {}  # 1H models for day traders
         self.models_4h: Dict[str, Dict] = {}
+        self.models_3d: Dict[str, Dict] = {}  # 3D models for position traders
         self.models_1d: Dict[str, Dict] = {}
 
     async def start(self):
@@ -446,11 +450,20 @@ class SignalScheduler:
             name="24H Signal Generation",
         )
 
+        # Schedule 3D signal generation at 00:10 UTC (once per day, but signals valid 72h)
+        # 3D is for position traders who want wider targets and longer hold times
+        self.scheduler.add_job(
+            self.generate_and_send_signals_3d,
+            CronTrigger(hour=0, minute=10),
+            id="signal_generation_3d",
+            name="3D Signal Generation",
+        )
+
         # Also run 4H immediately on startup
         await self.generate_and_send_signals_4h()
 
         self.scheduler.start()
-        logger.info("Scheduler started - 1H (every hour) + 4H (every 4 hours) + 24H (daily at 00:05 UTC)")
+        logger.info("Scheduler started - 1H (every hour) + 4H (every 4 hours) + 24H (daily at 00:05 UTC) + 3D (daily at 00:10 UTC)")
 
     async def stop(self):
         """Shutdown the scheduler"""
@@ -517,7 +530,25 @@ class SignalScheduler:
             else:
                 logger.warning(f"No 24H model found for {symbol}")
 
-        logger.info(f"Loaded {len(self.models_1h)} 1H models, {len(self.models_4h)} 4H models, {len(self.models_1d)} 24H models")
+            # Load 3D models (for position traders)
+            model_path_3d = self._find_latest_model(symbol, "3d")
+            if model_path_3d:
+                try:
+                    is_v2 = "v2_" in os.path.basename(model_path_3d)
+                    self.models_3d[symbol] = {
+                        "long": joblib.load(os.path.join(model_path_3d, "long.joblib")),
+                        "short": joblib.load(os.path.join(model_path_3d, "short.joblib")),
+                        "features": joblib.load(os.path.join(model_path_3d, "features.joblib")),
+                        "config": joblib.load(os.path.join(model_path_3d, "config.joblib")),
+                        "is_v2": is_v2,
+                    }
+                    logger.info(f"Loaded 3D {'v2' if is_v2 else 'v1'} model for {symbol}")
+                except Exception as e:
+                    logger.error(f"Failed to load 3D model for {symbol}: {e}")
+            else:
+                logger.debug(f"No 3D model found for {symbol}")
+
+        logger.info(f"Loaded {len(self.models_1h)} 1H, {len(self.models_4h)} 4H, {len(self.models_1d)} 24H, {len(self.models_3d)} 3D models")
 
     def _find_latest_model(self, symbol: str, timeframe: str) -> Optional[str]:
         """Find latest model for symbol - prefers v2 models"""
@@ -702,6 +733,16 @@ class SignalScheduler:
             offset="1D",
             valid_hours=24,
             signal_type="24H"
+        )
+
+    async def generate_and_send_signals_3d(self):
+        """Generate 3D signals for position traders and send to Telegram"""
+        await self._generate_and_send_signals(
+            models=self.models_3d,
+            timeframe="3d",
+            offset="3D",
+            valid_hours=72,  # Valid for 3 days
+            signal_type="3D"
         )
 
     async def _generate_and_send_signals(
